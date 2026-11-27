@@ -1,0 +1,6 @@
+{
+  "name": "Frontier Guard: Border Patrol Simulator",
+  "description": "A realistic 3D open-world border patrol and vehicle inspection simulator featuring dynamic weather, day/night cycles, interactive document verification, drivable vehicles, and a story-driven campaign.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
