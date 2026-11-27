@@ -1,6 +1,9 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { FXAAShader } from 'three/addons/shaders/FXAAShader.js';
 
@@ -51,6 +54,10 @@ export interface SimHudState {
   waitingCount: number;
   activeCase: InspectionCase | null;
   holdingCase: InspectionCase | null;
+  rejectedCase: InspectionCase | null;
+  redRejectionAlert: { vehicleLabel: string; registration: string; reason: string } | null;
+  towAvailable: boolean;
+  towStatus: string | null;
   entryGateOpen: boolean;
   exitGateOpen: boolean;
   policeStatus: string | null;
@@ -76,7 +83,11 @@ export interface SimulationCallbacks {
   onToast: (msg: string) => void;
   onPauseToggle: () => void;
   onTimeAdvance: (hoursDelta: number) => void;
-  onInspectionFinished: (c: InspectionCase, outcome: 'approved' | 'rejected' | 'police_handled') => void;
+  onInspectionFinished: (
+    c: InspectionCase,
+    outcome: 'approved' | 'rejected' | 'police_handled',
+    reason?: string
+  ) => void;
 }
 
 interface TrafficActor {
@@ -89,7 +100,8 @@ interface TrafficActor {
     | 'on_weighbridge'
     | 'exiting_approved'
     | 'moving_to_holding'
-    | 'in_holding';
+    | 'in_holding'
+    | 'rejected_locked';
   driverState: 'inside' | 'exiting' | 'outside' | 'entering';
   zPos: number;
   xPos: number;
@@ -101,12 +113,29 @@ interface TrafficActor {
 
 interface PoliceDispatch {
   active: boolean;
-  phase: 'arriving' | 'officers_walking' | 'handling' | 'departing';
+  phase: 'arriving' | 'officers_walking' | 'communicating' | 'escorting' | 'boarding' | 'departing';
   carRig: VehicleRig;
   officers: [CharacterRig, CharacterRig];
+  targetActor: TrafficActor;
   timer: number;
-  targetZ: number;
-  targetX: number;
+  xPos: number;
+  zPos: number;
+  yaw: number;
+  stopX: number;
+  stopZ: number;
+  departStep: number;
+}
+
+interface TowDispatch {
+  active: boolean;
+  phase: 'arriving' | 'turning' | 'positioning' | 'attaching' | 'lifting' | 'towing';
+  towRig: VehicleRig;
+  targetActor: TrafficActor;
+  timer: number;
+  xPos: number;
+  zPos: number;
+  yaw: number;
+  waypointIdx: number;
 }
 
 const CCTV_FEEDS = [
@@ -122,11 +151,15 @@ const _right = new THREE.Vector3();
 const _moveDir = new THREE.Vector3();
 const _sunBaseCol = new THREE.Color(0xfff4dc);
 const _sunGoldenCol = new THREE.Color(0xfb923c);
-const _skyNightCol = new THREE.Color(0x0c1424);
-const _skyClearCol = new THREE.Color(0x8bb6d6);
-const _skyStormCol = new THREE.Color(0x7c8a96);
-const _skyGoldenCol = new THREE.Color(0xd97745);
+const _skyNightCol = new THREE.Color(0x0b1324);
+const _skyClearCol = new THREE.Color(0x90bcdb);
+const _skyStormCol = new THREE.Color(0x73818e);
+const _skyGoldenCol = new THREE.Color(0xe07a47);
+const _skyZenithNightCol = new THREE.Color(0x030712);
+const _skyZenithClearCol = new THREE.Color(0x1d4e89);
+const _skyZenithStormCol = new THREE.Color(0x3f4c59);
 const _skyWorkCol = new THREE.Color();
+const _skyZenithWorkCol = new THREE.Color();
 
 export class SimulationEngine {
   private container: HTMLElement;
@@ -134,10 +167,15 @@ export class SimulationEngine {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
   private composer: EffectComposer | null = null;
+  private bloomPass: UnrealBloomPass | null = null;
+  private outputPass: OutputPass | null = null;
   private fxaaPass: ShaderPass | null = null;
 
   private sunLight: THREE.DirectionalLight;
+  private rimLight: THREE.DirectionalLight;
   private hemiLight: THREE.HemisphereLight;
+  private skyMesh: THREE.Mesh;
+  private skyMat: THREE.ShaderMaterial;
   private flashlight: THREE.SpotLight;
   private flashlightTarget: THREE.Object3D;
   private policeSirenLight: THREE.PointLight;
@@ -150,10 +188,10 @@ export class SimulationEngine {
   private callbacks: SimulationCallbacks;
   private settings: AllSettings;
 
-  // Game state
+  // Game state (Permanent Night-Shift Operations: 21:00 - 04:00)
   private day = 1;
   private difficulty: DifficultyLevel = 'standard';
-  private timeOfDay = 8.5;
+  private timeOfDay = 22.5;
   private weather: WeatherType = 'clear';
   private paused = true;
   private disposed = false;
@@ -182,6 +220,7 @@ export class SimulationEngine {
 
   // Office Animations & Cached Light States
   private officeDoorOpen = false;
+  private officeLightOn = true;
   private drawersOpen: [boolean, boolean] = [false, false];
   private entryGateOpen = false;
   private exitGateOpen = false;
@@ -194,19 +233,21 @@ export class SimulationEngine {
   private queue: TrafficActor[] = [];
   private activeActor: TrafficActor | null = null;
   private holdingActor: TrafficActor | null = null;
+  private rejectedActor: TrafficActor | null = null;
   private spawnTimer = 1.5;
   private alarmActive = false;
   private currentAlert: QueueAlertInfo | null = null;
   private policeDispatch: PoliceDispatch | null = null;
   private policeStatus: string | null = null;
+  private towRequestAvailable = false;
+  private towDispatch: TowDispatch | null = null;
+  private towStatus: string | null = null;
+  private redRejectionAlert: { vehicleLabel: string; registration: string; reason: string } | null = null;
 
-  // Input & Loop
+  // Input & Loop (WASD movement + Arrow-Key smooth camera + Mouse interaction only)
   private keys: Record<string, boolean> = {};
-  private pointerLocked = false;
-  private lastPointerUnlockAt = 0;
-  private draggingLook = false;
-  private lastMouseX = 0;
-  private lastMouseY = 0;
+  private camYawVel = 0;
+  private camPitchVel = 0;
   private frameId = 0;
   private lastTime = performance.now();
   private elapsed = 0;
@@ -247,30 +288,130 @@ export class SimulationEngine {
     const h = container.clientHeight || window.innerHeight;
 
     this.renderer = new THREE.WebGLRenderer({
-      antialias: false,
+      antialias: !this.isSoftwareGl,
       powerPreference: 'high-performance',
     });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 1.08;
     this.renderer.shadowMap.enabled = !this.isSoftwareGl && settings.graphics.shadowQuality !== 'off';
-    this.renderer.shadowMap.type = THREE.BasicShadowMap;
+    this.renderer.shadowMap.type = this.isSoftwareGl ? THREE.BasicShadowMap : THREE.PCFSoftShadowMap;
     this.renderer.shadowMap.autoUpdate = false;
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(
-      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 1.5) * settings.graphics.resolutionScale
+      this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2) * settings.graphics.resolutionScale
     );
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x8bb6d6);
-    this.scene.fog = new THREE.Fog(0x8bb6d6, 45, settings.graphics.renderDistance);
+    this.scene.fog = new THREE.Fog(0x8bb6d6, 48, settings.graphics.renderDistance);
 
-    this.camera = new THREE.PerspectiveCamera(settings.graphics.fov, w / h, 0.12, 340);
+    // Procedural Studio / Sky Environment Reflections (PMREM + RoomEnvironment)
+    const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.72;
+    pmremGenerator.dispose();
+
+    // Procedural Atmospheric Sky Dome Shader (Rayleigh gradient, sun halo, drifting clouds & stars)
+    this.skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      fog: false,
+      uniforms: {
+        uZenithColor: { value: new THREE.Color(0x1d4e89) },
+        uHorizonColor: { value: new THREE.Color(0x90bcdb) },
+        uSunDir: { value: new THREE.Vector3(0.4, 0.7, -0.5).normalize() },
+        uSunColor: { value: new THREE.Color(0xfff4d6) },
+        uNightAmount: { value: 0 },
+        uCloudAmount: { value: 0.35 },
+        uTime: { value: 0 },
+      },
+      vertexShader: `
+        varying vec3 vWorldDir;
+        void main() {
+          vec4 worldPos = modelMatrix * vec4(position, 1.0);
+          vWorldDir = normalize(position);
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vWorldDir;
+        uniform vec3 uZenithColor;
+        uniform vec3 uHorizonColor;
+        uniform vec3 uSunDir;
+        uniform vec3 uSunColor;
+        uniform float uNightAmount;
+        uniform float uCloudAmount;
+        uniform float uTime;
+
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = hash(i);
+          float b = hash(i + vec2(1.0, 0.0));
+          float c = hash(i + vec2(0.0, 1.0));
+          float d = hash(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          for (int i = 0; i < 4; i++) {
+            v += a * noise(p);
+            p *= 2.03;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          vec3 dir = normalize(vWorldDir);
+          float h = clamp(dir.y, 0.0, 1.0);
+          vec3 sky = mix(uHorizonColor, uZenithColor, pow(h, 0.55));
+
+          // Solar / Lunar Mie atmospheric halo
+          float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
+          float halo = pow(sunDot, 12.0) * 0.42 + pow(sunDot, 128.0) * 0.65;
+          sky += uSunColor * halo * (1.0 - uNightAmount * 0.65);
+
+          // Procedural drifting high-altitude clouds
+          if (dir.y > 0.03) {
+            vec2 cloudUv = dir.xz / (dir.y + 0.22) * 1.4 + vec2(uTime * 0.008, uTime * 0.004);
+            float c = fbm(cloudUv);
+            float cover = smoothstep(0.55 - uCloudAmount * 0.35, 0.88, c);
+            vec3 cloudCol = mix(vec3(0.96, 0.97, 0.99), uHorizonColor * 0.72, uNightAmount * 0.85);
+            cloudCol += uSunColor * pow(sunDot, 6.0) * 0.35 * (1.0 - uNightAmount);
+            sky = mix(sky, cloudCol, cover * smoothstep(0.03, 0.22, dir.y) * 0.75);
+          }
+
+          // Twinkling night stars
+          if (uNightAmount > 0.05 && dir.y > 0.08) {
+            vec2 starUv = floor(dir.xz / (dir.y + 0.15) * 140.0);
+            float s = hash(starUv);
+            if (s > 0.992) {
+              float twinkle = 0.65 + 0.35 * sin(uTime * 3.0 + s * 100.0);
+              sky += vec3(0.92, 0.95, 1.0) * uNightAmount * twinkle * smoothstep(0.08, 0.35, dir.y);
+            }
+          }
+
+          gl_FragColor = vec4(sky, 1.0);
+        }
+      `,
+    });
+    this.skyMesh = new THREE.Mesh(new THREE.SphereGeometry(310, 28, 18), this.skyMat);
+    this.skyMesh.frustumCulled = false;
+    this.scene.add(this.skyMesh);
+
+    this.camera = new THREE.PerspectiveCamera(settings.graphics.fov, w / h, 0.12, 360);
     this.scene.add(this.camera);
 
     // Officer Handheld Flashlight mounted to camera
-    this.flashlight = new THREE.SpotLight(0xfff7e6, 0, 28, 0.44, 0.55, 1.3);
+    this.flashlight = new THREE.SpotLight(0xfff7e6, 0, 32, 0.44, 0.58, 1.25);
     this.flashlight.position.set(0.18, -0.14, 0);
     this.flashlightTarget = new THREE.Object3D();
     this.flashlightTarget.position.set(0, -0.1, -8);
@@ -279,37 +420,44 @@ export class SimulationEngine {
     this.flashlight.target = this.flashlightTarget;
 
     // Pre-attached Police Siren Light (intensity=0 when idle -> prevents mid-game shader recompile!)
-    this.policeSirenLight = new THREE.PointLight(0xef4444, 0, 18, 1.5);
+    this.policeSirenLight = new THREE.PointLight(0xef4444, 0, 20, 1.45);
     this.policeSirenLight.position.set(0, 3, 0);
     this.scene.add(this.policeSirenLight);
 
-    // Lightweight Hemisphere + Key Directional Light (Intel UHD 610 friendly)
+    // Three-Point Atmospheric Lighting Rig (Warm Sun Key + Cool Sky/Earth Hemi + Subtle Rim Backlight)
     this.hemiLight = new THREE.HemisphereLight(0xcbe5ff, 0x453f35, 0.85);
     this.scene.add(this.hemiLight);
 
-    this.sunLight = new THREE.DirectionalLight(0xfff4dc, 1.75);
+    this.sunLight = new THREE.DirectionalLight(0xfff4dc, 1.9);
     this.sunLight.position.set(45, 70, 35);
     this.sunLight.castShadow = !this.isSoftwareGl && settings.graphics.shadowQuality !== 'off';
-    this.sunLight.shadow.mapSize.set(512, 512);
+    this.sunLight.shadow.mapSize.set(1024, 1024);
+    this.sunLight.shadow.bias = -0.0004;
+    this.sunLight.shadow.normalBias = 0.025;
+    this.sunLight.shadow.radius = 2.5;
     this.sunLight.shadow.camera.left = -45;
     this.sunLight.shadow.camera.right = 45;
     this.sunLight.shadow.camera.top = 45;
     this.sunLight.shadow.camera.bottom = -45;
-    this.sunLight.shadow.camera.far = 160;
+    this.sunLight.shadow.camera.far = 175;
     this.scene.add(this.sunLight);
 
-    // Lightweight Rain Particles
-    const rPos = new Float32Array(450 * 3);
-    for (let i = 0; i < 450; i++) {
-      rPos[i * 3] = (Math.random() - 0.5) * 44;
-      rPos[i * 3 + 1] = Math.random() * 18;
-      rPos[i * 3 + 2] = (Math.random() - 0.5) * 44;
+    this.rimLight = new THREE.DirectionalLight(0x93c5fd, 0.42);
+    this.rimLight.position.set(-40, 28, -45);
+    this.scene.add(this.rimLight);
+
+    // Rain Precipitation Particles
+    const rPos = new Float32Array(700 * 3);
+    for (let i = 0; i < 700; i++) {
+      rPos[i * 3] = (Math.random() - 0.5) * 46;
+      rPos[i * 3 + 1] = Math.random() * 19;
+      rPos[i * 3 + 2] = (Math.random() - 0.5) * 46;
     }
     const rGeo = new THREE.BufferGeometry();
     rGeo.setAttribute('position', new THREE.BufferAttribute(rPos, 3));
     this.rainPoints = new THREE.Points(
       rGeo,
-      new THREE.PointsMaterial({ color: 0xcbd5e1, size: 0.2, transparent: true, opacity: 0.55 })
+      new THREE.PointsMaterial({ color: 0xdbeafe, size: 0.16, transparent: true, opacity: 0.62 })
     );
     this.rainPoints.visible = false;
     this.scene.add(this.rainPoints);
@@ -336,6 +484,14 @@ export class SimulationEngine {
     const h = this.container.clientHeight || window.innerHeight;
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+
+    // Subtle high-threshold bloom makes headlights, sirens, traffic lights, and bay lamps glow cleanly
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.24, 0.35, 0.92);
+    this.composer.addPass(this.bloomPass);
+
+    this.outputPass = new OutputPass();
+    this.composer.addPass(this.outputPass);
+
     this.fxaaPass = new ShaderPass(FXAAShader);
     const pr = this.renderer.getPixelRatio();
     this.fxaaPass.material.uniforms['resolution'].value.set(1 / (w * pr), 1 / (h * pr));
@@ -349,7 +505,7 @@ export class SimulationEngine {
     this.camera.updateProjectionMatrix();
 
     if (!this.isSoftwareGl) {
-      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5) * s.graphics.resolutionScale);
+      this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2) * s.graphics.resolutionScale);
     }
     const shadowsOn = !this.isSoftwareGl && s.graphics.shadowQuality !== 'off';
     this.renderer.shadowMap.enabled = shadowsOn;
@@ -368,6 +524,9 @@ export class SimulationEngine {
     if (s.graphics.postProcessing && !this.isSoftwareGl) {
       this.ensureComposer();
     }
+    if (this.bloomPass) {
+      this.bloomPass.enabled = s.graphics.postProcessing;
+    }
     if (this.fxaaPass) {
       this.fxaaPass.enabled = s.graphics.postProcessing && s.graphics.antiAliasing === 'fxaa';
     }
@@ -376,15 +535,18 @@ export class SimulationEngine {
   public syncWorldParams(day: number, difficulty: DifficultyLevel, timeOfDay: number, weather: WeatherType) {
     this.day = day;
     this.difficulty = difficulty;
-    if (Math.abs(timeOfDay - this.timeOfDay) > 0.05) {
-      this.timeOfDay = timeOfDay;
+    const nightClamped = timeOfDay >= 4.0 && timeOfDay < 21.0 ? 22.5 : timeOfDay;
+    if (Math.abs(nightClamped - this.timeOfDay) > 0.05) {
+      this.timeOfDay = nightClamped;
     }
     const weatherChanged = this.weather !== weather;
     this.weather = weather;
     this.rainPoints.visible = weather === 'rain' && this.settings.graphics.particleQuality !== 'off';
     if (weatherChanged) {
       if (this.world.roadMesh.material instanceof THREE.MeshStandardMaterial) {
-        this.world.roadMesh.material.roughness = weather === 'rain' ? 0.25 : 0.88;
+        this.world.roadMesh.material.roughness = weather === 'rain' ? 0.16 : 0.82;
+        this.world.roadMesh.material.metalness = weather === 'rain' ? 0.24 : 0.06;
+        this.world.roadMesh.material.envMapIntensity = weather === 'rain' ? 1.45 : 0.75;
       }
       this.sound.updateWeatherAmbient(weather);
     }
@@ -393,32 +555,9 @@ export class SimulationEngine {
   public setPaused(paused: boolean) {
     this.paused = paused;
     if (paused) {
-      if (document.pointerLockElement === this.renderer.domElement) {
-        document.exitPointerLock();
-        this.lastPointerUnlockAt = performance.now();
-      }
       this.keys = {};
-      this.draggingLook = false;
-    }
-  }
-
-  public lockCursor() {
-    this.sound.unlock();
-    if (this.paused || this.cctvIndex !== -1) return;
-    if (document.pointerLockElement === this.renderer.domElement) return;
-    // Browsers disallow re-acquiring pointer lock immediately after user exits it (Esc)
-    if (performance.now() - this.lastPointerUnlockAt < 1300) return;
-
-    try {
-      const res = this.renderer.domElement.requestPointerLock() as unknown as Promise<void> | undefined;
-      if (res && typeof res.catch === 'function') {
-        res.catch(() => {
-          this.pointerLocked = false;
-          this.lastPointerUnlockAt = performance.now();
-        });
-      }
-    } catch {
-      // Drag look fallback
+      this.camYawVel = 0;
+      this.camPitchVel = 0;
     }
   }
 
@@ -463,10 +602,21 @@ export class SimulationEngine {
     } else {
       this.cctvIndex++;
     }
+    const cctvActive = this.cctvIndex >= 0;
+    this.world.cctvScreenMat.emissiveIntensity = cctvActive ? 1.2 : 0.45;
     this.sound.playClick();
   }
 
   public toggleEntryGate() {
+    if (
+      !this.entryGateOpen &&
+      (this.rejectedActor !== null || this.policeDispatch?.active || this.towDispatch?.active)
+    ) {
+      this.callbacks.onToast(
+        'Lane Locked: Clear rejected driver with Police & Tow Truck before admitting the next vehicle!'
+      );
+      return;
+    }
     const blocking = [...this.queue, this.activeActor].some(
       (a) => a && Math.abs(a.zPos - (-18)) < 4.5
     );
@@ -479,7 +629,7 @@ export class SimulationEngine {
     if (this.entryGateOpen) {
       this.acknowledgeAlarm();
       // Move lead queued vehicle onto weighbridge if weighbridge is clear
-      if (!this.activeActor && this.queue.length > 0) {
+      if (!this.activeActor && !this.rejectedActor && this.queue.length > 0) {
         const lead = this.queue.shift()!;
         lead.state = 'entering_weighbridge';
         setVehicleShadowCasting(lead.rig, true);
@@ -489,7 +639,10 @@ export class SimulationEngine {
   }
 
   public toggleExitGate() {
-    const blocking = this.activeActor && Math.abs(this.activeActor.zPos - 18) < 4.5;
+    const blocking =
+      (this.activeActor && Math.abs(this.activeActor.zPos - 18) < 4.5) ||
+      (this.rejectedActor && Math.abs(this.rejectedActor.zPos - 18) < 4.5) ||
+      (this.towDispatch?.active && Math.abs(this.towDispatch.zPos - 18) < 5.5);
     if (this.exitGateOpen && blocking) {
       this.callbacks.onToast('Gate Safety Sensor: Vehicle currently crossing Exit Gate!');
       return;
@@ -582,12 +735,18 @@ export class SimulationEngine {
     decision: 'approved' | 'rejected' | 'further_inspection',
     reasonText?: string
   ) {
-    const actor = this.activeActor?.caseData.caseId === caseData.caseId ? this.activeActor : this.holdingActor;
+    const actor =
+      this.activeActor?.caseData.caseId === caseData.caseId
+        ? this.activeActor
+        : this.holdingActor?.caseData.caseId === caseData.caseId
+        ? this.holdingActor
+        : null;
     if (!actor) return;
 
     actor.caseData.finalDecision = decision;
 
     if (decision === 'approved') {
+      actor.caseData.status = 'APPROVED';
       this.sound.playStamp(true);
       setCharacterEmotion(actor.driver, 'happy');
       actor.driver.animState = 'talk';
@@ -603,9 +762,23 @@ export class SimulationEngine {
       this.exitGateOpen = true;
       this.sound.playGate();
       updateWeighbridgeSign(this.world, null, null);
-      this.callbacks.onInspectionFinished(actor.caseData, 'approved');
+      this.callbacks.onInspectionFinished(actor.caseData, 'approved', reasonText || 'All checks passed.');
     } else if (decision === 'rejected') {
+      const recordedReason =
+        (reasonText && reasonText.trim()) ||
+        actor.caseData.issuesSummary[0] ||
+        'Checkpoint inspection violation detected.';
+      actor.caseData.status = 'REJECTED';
+      actor.caseData.rejectionReason = recordedReason;
+
       this.sound.playStamp(false);
+      this.sound.playRejectionWarning();
+      this.redRejectionAlert = {
+        vehicleLabel: actor.caseData.vehicleLabel,
+        registration: actor.caseData.registration,
+        reason: recordedReason,
+      };
+
       const emo: DriverEmotion =
         actor.caseData.personality === 'frustrated' || actor.caseData.personality === 'impatient'
           ? 'frustrated'
@@ -622,22 +795,23 @@ export class SimulationEngine {
           : actor.caseData.personality === 'nervous'
           ? '"Wait... rejected? Look, maybe there is a misunderstanding with the papers?"'
           : '"Why has my vehicle been rejected, officer? Which rule did I break?"';
-      this.callbacks.onSubtitle(actor.caseData.driverName, `${line} (Officer: ${reasonText || 'Check failed.'})`);
+      this.callbacks.onSubtitle(actor.caseData.driverName, `${line} (Reason: ${recordedReason})`);
 
-      // Move vehicle into Holding Area if currently on weighbridge
+      // Keep rejected vehicle on-site & lock bay until Police remove driver and Tow Truck removes vehicle
+      actor.state = 'rejected_locked';
+      actor.rig.indicatorState = 0;
+      this.rejectedActor = actor;
       if (actor === this.activeActor) {
-        if (actor.driverState === 'outside') {
-          actor.driverState = 'entering';
-        }
-        actor.exitActionDelay = 1.8;
-        actor.state = 'moving_to_holding';
-        actor.rig.indicatorState = -1;
-        this.holdingActor = actor;
         this.activeActor = null;
         updateWeighbridgeSign(this.world, null, null);
+      } else if (actor === this.holdingActor) {
+        this.holdingActor = null;
       }
-      this.callbacks.onInspectionFinished(actor.caseData, 'rejected');
+
+      this.callbacks.onInspectionFinished(actor.caseData, 'rejected', recordedReason);
+      this.initiatePoliceResponse(actor);
     } else {
+      actor.caseData.status = 'HOLDING';
       this.sound.playRadioBeep();
       setCharacterEmotion(actor.driver, 'confused');
       this.callbacks.onSubtitle(
@@ -655,26 +829,23 @@ export class SimulationEngine {
     }
   }
 
-  public requestPoliceAssistance() {
-    if (this.policeDispatch?.active) {
-      this.callbacks.onToast('Police unit is already en route / on scene.');
-      return;
-    }
-    const targetActor = this.holdingActor ?? this.activeActor;
-    if (!targetActor) {
-      this.callbacks.onToast('No active or holding vehicle requires police assistance.');
-      return;
-    }
-
+  private initiatePoliceResponse(targetActor: TrafficActor) {
+    if (this.policeDispatch?.active) return;
+    this.towRequestAvailable = false;
     this.sound.playRadioBeep();
-    this.policeStatus = 'Dispatching Patrol Unit S7...';
-    const carRig = createVehicleMesh('police_car', 0x16243b, this.mats, 'PD-911');
-    carRig.root.position.set(-5.5, 0, 58);
+    this.policeStatus = 'Armored Security Unit SEC-407 responding to checkpoint...';
+
+    const carRig = createVehicleMesh('armored_security', 0x464b52, this.mats, 'SEC-407');
+    const startX = 3.8;
+    const startZ = 54;
+    carRig.root.position.set(startX, 0, startZ);
+    carRig.root.rotation.y = 0; // Facing -Z into checkpoint
     carRig.sirenOn = true;
     carRig.headlightsOn = true;
     setVehicleShadowCasting(carRig, true);
     this.scene.add(carRig.root);
     this.sound.setSiren(true);
+    this.exitGateOpen = true;
 
     const off1 = createCharacterMesh('police_officer', 'Sgt. Arjun', 401);
     const off2 = createCharacterMesh('police_officer', 'Officer Maya', 402);
@@ -682,16 +853,81 @@ export class SimulationEngine {
     off2.root.visible = false;
     this.scene.add(off1.root, off2.root);
 
+    const stopX = targetActor.xPos > 5 ? 7.6 : 3.8;
+    const stopZ = targetActor.zPos + 8.6;
+
     this.policeDispatch = {
       active: true,
       phase: 'arriving',
       carRig,
       officers: [off1, off2],
+      targetActor,
       timer: 0,
-      targetX: targetActor.xPos - 3.5,
-      targetZ: targetActor.zPos,
+      xPos: startX,
+      zPos: startZ,
+      yaw: 0,
+      stopX,
+      stopZ,
+      departStep: 0,
     };
-    this.callbacks.onToast('Police Backup Requested: Patrol car approaching checkpoint!');
+    this.callbacks.onToast('REJECTED — Armored Security Unit dispatched to remove driver.');
+  }
+
+  public requestPoliceAssistance() {
+    if (this.policeDispatch?.active) {
+      this.callbacks.onToast('Armored Security Police unit is already responding / on scene.');
+      return;
+    }
+    const targetActor = this.rejectedActor ?? this.holdingActor ?? this.activeActor;
+    if (!targetActor) {
+      this.callbacks.onToast('No active, holding, or rejected vehicle requires police assistance.');
+      return;
+    }
+    this.initiatePoliceResponse(targetActor);
+  }
+
+  public requestTowTruck() {
+    if (this.towDispatch?.active) {
+      this.callbacks.onToast('Police Tow Unit T-04 is already en route / towing!');
+      return;
+    }
+    if (!this.rejectedActor) {
+      this.callbacks.onToast('No rejected vehicle awaiting towing.');
+      return;
+    }
+    if (this.policeDispatch?.active || !this.towRequestAvailable) {
+      this.callbacks.onToast('Wait until Police take the rejected driver away before calling the Tow Truck!');
+      return;
+    }
+
+    this.sound.playRadioBeep();
+    this.towRequestAvailable = false;
+    this.towStatus = 'Tow Truck Request Accepted · Unit T-04 En Route';
+    this.policeStatus = null;
+
+    const towRig = createVehicleMesh('police_tow_truck', 0x16243b, this.mats, 'TOW-04');
+    const startX = 3.6;
+    const startZ = 54;
+    towRig.root.position.set(startX, 0, startZ);
+    towRig.root.rotation.y = 0; // Facing -Z into checkpoint
+    towRig.sirenOn = true;
+    towRig.headlightsOn = true;
+    setVehicleShadowCasting(towRig, true);
+    this.scene.add(towRig.root);
+    this.exitGateOpen = true;
+
+    this.towDispatch = {
+      active: true,
+      phase: 'arriving',
+      towRig,
+      targetActor: this.rejectedActor,
+      timer: 0,
+      xPos: startX,
+      zPos: startZ,
+      yaw: 0,
+      waypointIdx: 0,
+    };
+    this.callbacks.onToast('Tow Truck Request Accepted: Police Tow Unit T-04 approaching checkpoint!');
   }
 
   private spawnIncomingVehicle() {
@@ -766,13 +1002,52 @@ export class SimulationEngine {
         obj = obj.parent;
       }
       if (obj && obj.userData.interactId) {
-        this.currentAimId = obj.userData.interactId as string;
-        this.currentAimPrompt = obj.userData.interactLabel as string;
+        const id = obj.userData.interactId as string;
+        this.currentAimId = id;
+        this.currentAimPrompt = this.resolveAimPrompt(id, obj.userData.interactLabel as string);
         return;
       }
     }
     this.currentAimId = null;
     this.currentAimPrompt = null;
+  }
+
+  private resolveAimPrompt(id: string, fallback: string): string {
+    if (id === 'entry_gate_panel') return this.entryGateOpen ? '[CLOSE GATE]' : '[OPEN GATE]';
+    if (id === 'exit_gate_panel') return this.exitGateOpen ? '[CLOSE EXIT GATE]' : '[OPEN EXIT GATE]';
+    if (id === 'office_door') return this.officeDoorOpen ? '[CLOSE DOOR]' : '[OPEN DOOR]';
+    if (id === 'office_light_switch') return this.officeLightOn ? '[TURN OFF LIGHT]' : '[TURN ON LIGHT]';
+    if (id === 'office_cctv') return this.cctvIndex >= 0 ? '[TURN OFF CCTV]' : '[TURN ON CCTV]';
+    if (id === 'office_lens_kit') return this.lensMode ? '[TURN OFF LENS]' : '[USE LENS]';
+    if (id === 'office_radio') {
+      if (this.alarmActive) return '[USE RADIO · ACKNOWLEDGE ALERT]';
+      if (this.towRequestAvailable) return '[USE RADIO · REQUEST TOW TRUCK]';
+      return '[USE RADIO]';
+    }
+    if (id === 'office_chair') return this.sitting ? '[STAND UP]' : '[SIT ON CHAIR]';
+    if (id === 'drawer_0') return this.drawersOpen[0] ? '[CLOSE DRAWER 1]' : '[OPEN DRAWER 1]';
+    if (id === 'drawer_1') return this.drawersOpen[1] ? '[CLOSE DRAWER 2]' : '[OPEN DRAWER 2]';
+    if (id.startsWith('veh_door:')) {
+      const cid = id.split(':')[1];
+      const actor =
+        this.activeActor?.caseData.caseId === cid
+          ? this.activeActor
+          : this.holdingActor?.caseData.caseId === cid
+          ? this.holdingActor
+          : null;
+      return actor?.driverState === 'outside' ? '[CLOSE VEHICLE DOOR]' : '[OPEN VEHICLE DOOR]';
+    }
+    if (id.startsWith('veh_trunk:')) {
+      const cid = id.split(':')[1];
+      const actor =
+        this.activeActor?.caseData.caseId === cid
+          ? this.activeActor
+          : this.holdingActor?.caseData.caseId === cid
+          ? this.holdingActor
+          : null;
+      return actor?.rig.trunkOpen ? '[CLOSE CARGO BAY]' : '[OPEN CARGO BAY]';
+    }
+    return fallback;
   }
 
   private executeAimedInteraction() {
@@ -782,6 +1057,9 @@ export class SimulationEngine {
 
     if (id === 'office_door') {
       this.officeDoorOpen = !this.officeDoorOpen;
+    } else if (id === 'office_light_switch') {
+      this.officeLightOn = !this.officeLightOn;
+      this.callbacks.onToast(this.officeLightOn ? 'Office Lights Turned ON.' : 'Office Lights Turned OFF.');
     } else if (id === 'office_coffee') {
       this.sound.playCoffeeSip();
       this.callbacks.onToast('Fresh hot coffee! Officer alertness restored.');
@@ -812,6 +1090,8 @@ export class SimulationEngine {
       if (this.alarmActive) {
         this.acknowledgeAlarm();
         this.callbacks.onToast('Alert acknowledged via Checkpoint Radio.');
+      } else if (this.towRequestAvailable) {
+        this.requestTowTruck();
       } else {
         this.requestPoliceAssistance();
       }
@@ -819,6 +1099,12 @@ export class SimulationEngine {
       const c = this.activeActor?.caseData ?? this.holdingActor?.caseData;
       if (c) this.callbacks.onOpenReport(c);
       else this.callbacks.onToast('No vehicle currently under inspection.');
+    } else if (id === 'office_docs') {
+      const c = this.activeActor?.caseData ?? this.holdingActor?.caseData;
+      if (c) this.callbacks.onOpenDocuments(c);
+      else this.callbacks.onToast('No vehicle documents on desk yet — guide a vehicle onto the bay.');
+    } else if (id === 'office_lens_kit') {
+      this.toggleLensMode();
     } else if (id === 'entry_gate_panel') {
       this.toggleEntryGate();
     } else if (id === 'exit_gate_panel') {
@@ -918,12 +1204,15 @@ export class SimulationEngine {
     window.addEventListener('resize', this.onResize);
     window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('keyup', this.onKeyUp);
-    document.addEventListener('pointerlockchange', this.onPointerLockChange);
-    document.addEventListener('pointerlockerror', this.onPointerLockError);
+    window.addEventListener('blur', this.onWindowBlur);
     canvas.addEventListener('mousedown', this.onMouseDown);
-    window.addEventListener('mouseup', this.onMouseUp);
-    window.addEventListener('mousemove', this.onMouseMove);
   }
+
+  private onWindowBlur = () => {
+    this.keys = {};
+    this.camYawVel = 0;
+    this.camPitchVel = 0;
+  };
 
   private onResize = () => {
     if (this.disposed) return;
@@ -939,72 +1228,20 @@ export class SimulationEngine {
     }
   };
 
-  private onPointerLockChange = () => {
-    const wasLocked = this.pointerLocked;
-    this.pointerLocked = document.pointerLockElement === this.renderer.domElement;
-    if (wasLocked && !this.pointerLocked) {
-      this.lastPointerUnlockAt = performance.now();
-    }
-  };
-
-  private onPointerLockError = () => {
-    this.pointerLocked = false;
-    this.lastPointerUnlockAt = performance.now();
-  };
-
   private onMouseDown = (e: MouseEvent) => {
     if (this.paused) return;
     this.sound.unlock();
+    // Mouse Left Click = Object Interaction ONLY (never moves player or rotates camera)
     if (e.button === 0) {
       if (this.cctvIndex !== -1) {
         this.toggleCctv();
         return;
       }
       this.performCenterRaycast();
-      const aimId = this.currentAimId;
-      const opensModal =
-        aimId === 'office_computer' ||
-        aimId === 'office_report' ||
-        aimId === 'office_bulletin' ||
-        aimId === 'weighbridge_terminal' ||
-        Boolean(aimId?.startsWith('driver:'));
-
-      if (aimId) {
+      if (this.currentAimId) {
         this.executeAimedInteraction();
       }
-      if (!this.pointerLocked && !opensModal) {
-        this.lockCursor();
-        this.draggingLook = true;
-        this.lastMouseX = e.clientX;
-        this.lastMouseY = e.clientY;
-      }
     }
-  };
-
-  private onMouseUp = () => {
-    this.draggingLook = false;
-  };
-
-  private onMouseMove = (e: MouseEvent) => {
-    if (this.paused || this.cctvIndex !== -1) return;
-    let dx = 0;
-    let dy = 0;
-    if (this.pointerLocked) {
-      dx = e.movementX;
-      dy = e.movementY;
-    } else if (this.draggingLook) {
-      dx = e.clientX - this.lastMouseX;
-      dy = e.clientY - this.lastMouseY;
-      this.lastMouseX = e.clientX;
-      this.lastMouseY = e.clientY;
-    } else {
-      return;
-    }
-
-    const sens = 0.0022 * this.settings.controls.mouseSensitivity;
-    const inv = this.settings.controls.invertY ? -1 : 1;
-    this.playerYaw -= dx * sens;
-    this.playerPitch = THREE.MathUtils.clamp(this.playerPitch - dy * sens * inv, -1.35, 1.35);
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -1017,6 +1254,15 @@ export class SimulationEngine {
       return;
     }
     if (this.paused) return;
+    if (
+      e.code === 'ArrowUp' ||
+      e.code === 'ArrowDown' ||
+      e.code === 'ArrowLeft' ||
+      e.code === 'ArrowRight' ||
+      e.code === 'Space'
+    ) {
+      e.preventDefault();
+    }
     this.sound.unlock();
     this.keys[e.code] = true;
 
@@ -1042,6 +1288,27 @@ export class SimulationEngine {
     this.keys[e.code] = false;
   };
 
+  private updateCameraFromArrows(dt: number) {
+    // ARROW KEYS EXCLUSIVELY control smooth camera rotation & looking direction
+    const turnInput = (this.keys['ArrowLeft'] ? 1 : 0) - (this.keys['ArrowRight'] ? 1 : 0);
+    const lookInput = (this.keys['ArrowUp'] ? 1 : 0) - (this.keys['ArrowDown'] ? 1 : 0);
+    const inv = this.settings.controls.invertY ? -1 : 1;
+    const sens = this.settings.controls.mouseSensitivity;
+
+    const targetYawVel = turnInput * 1.85 * sens;
+    const targetPitchVel = lookInput * 1.35 * sens * inv;
+
+    this.camYawVel = THREE.MathUtils.damp(this.camYawVel, targetYawVel, 16, dt);
+    this.camPitchVel = THREE.MathUtils.damp(this.camPitchVel, targetPitchVel, 16, dt);
+
+    if (Math.abs(this.camYawVel) > 0.0005) {
+      this.playerYaw += this.camYawVel * dt;
+    }
+    if (Math.abs(this.camPitchVel) > 0.0005) {
+      this.playerPitch = THREE.MathUtils.clamp(this.playerPitch + this.camPitchVel * dt, -1.35, 1.35);
+    }
+  }
+
   private updatePlayer(dt: number) {
     if (this.cctvIndex !== -1) {
       const feed = CCTV_FEEDS[this.cctvIndex];
@@ -1049,6 +1316,8 @@ export class SimulationEngine {
       this.camera.lookAt(feed.look);
       return;
     }
+
+    this.updateCameraFromArrows(dt);
 
     if (this.sitting) {
       this.currentEyeHeight = THREE.MathUtils.damp(this.currentEyeHeight, 1.18, 10, dt);
@@ -1060,8 +1329,9 @@ export class SimulationEngine {
       return;
     }
 
-    const fwd = (this.keys['KeyW'] || this.keys['ArrowUp'] ? 1 : 0) - (this.keys['KeyS'] || this.keys['ArrowDown'] ? 1 : 0);
-    const str = (this.keys['KeyD'] || this.keys['ArrowRight'] ? 1 : 0) - (this.keys['KeyA'] || this.keys['ArrowLeft'] ? 1 : 0);
+    // WASD EXCLUSIVELY controls player movement (forward/back/strafe + diagonal)
+    const fwd = (this.keys['KeyW'] ? 1 : 0) - (this.keys['KeyS'] ? 1 : 0);
+    const str = (this.keys['KeyD'] ? 1 : 0) - (this.keys['KeyA'] ? 1 : 0);
     const sprint = (this.keys['ShiftLeft'] || this.keys['ShiftRight']) && !this.crouching && fwd > 0;
     const speed = this.crouching ? 2.4 : sprint ? 6.8 : 4.3;
 
@@ -1288,13 +1558,52 @@ export class SimulationEngine {
       }
     }
 
-    // Police Dispatch Sequence
+    // Rejected Vehicle (stationary on-site awaiting police driver removal & tow truck)
+    if (this.rejectedActor) {
+      const r = this.rejectedActor;
+      r.rig.headlightsOn = isNight;
+      updateDriverWalk(r);
+      if (!this.towDispatch || this.towDispatch.phase !== 'towing') {
+        animateVehicleRig(r.rig, dt, 0, 0, true, this.elapsed);
+      }
+    }
+
+    // Helper for smooth realistic vehicle steering along waypoints
+    const driveTowardWaypoint = (
+      curX: number,
+      curZ: number,
+      curYaw: number,
+      targetX: number,
+      targetZ: number,
+      speed: number,
+      turnRate: number
+    ): { x: number; z: number; yaw: number; steer: number; dist: number } => {
+      const dx = targetX - curX;
+      const dz = targetZ - curZ;
+      const dist = Math.hypot(dx, dz);
+      const desiredYaw = Math.atan2(-dx, -dz);
+      const diff = Math.atan2(Math.sin(desiredYaw - curYaw), Math.cos(desiredYaw - curYaw));
+      const stepYaw = THREE.MathUtils.clamp(diff, -turnRate * dt, turnRate * dt);
+      const nextYaw = curYaw + stepYaw;
+      const fwdX = -Math.sin(nextYaw);
+      const fwdZ = -Math.cos(nextYaw);
+      return {
+        x: curX + fwdX * speed * dt,
+        z: curZ + fwdZ * speed * dt,
+        yaw: nextYaw,
+        steer: THREE.MathUtils.clamp(diff * 0.65, -0.45, 0.45),
+        dist,
+      };
+    };
+
+    // Armored Security Truck Police Response & Driver Custody Sequence
     if (this.policeDispatch?.active) {
       const pd = this.policeDispatch;
+      const tgt = pd.targetActor;
       this.sound.updateSiren(this.elapsed);
       if (pd.carRig.sirenOn) {
         const sirenPhase = Math.sin(this.elapsed * 14) > 0;
-        this.policeSirenLight.position.set(pd.carRig.root.position.x, 2.3, pd.carRig.root.position.z);
+        this.policeSirenLight.position.set(pd.xPos, 2.7, pd.zPos);
         this.policeSirenLight.intensity = 4.2;
         this.policeSirenLight.color.setHex(sirenPhase ? 0xef4444 : 0x3b82f6);
       } else {
@@ -1302,74 +1611,337 @@ export class SimulationEngine {
       }
 
       if (pd.phase === 'arriving') {
-        const curZ = pd.carRig.root.position.z;
-        const targetCarZ = 15.5;
-        if (curZ > targetCarZ) {
-          pd.carRig.root.position.z -= 11 * dt;
-          animateVehicleRig(pd.carRig, dt, 11, 0, false, this.elapsed);
-        } else {
+        const res = driveTowardWaypoint(pd.xPos, pd.zPos, pd.yaw, pd.stopX, pd.stopZ, 9.5, 2.4);
+        pd.xPos = res.x;
+        pd.zPos = res.z;
+        pd.yaw = res.yaw;
+        pd.carRig.root.position.set(pd.xPos, 0, pd.zPos);
+        pd.carRig.root.rotation.y = pd.yaw;
+        animateVehicleRig(pd.carRig, dt, 9.5, res.steer, false, this.elapsed);
+
+        if (res.dist < 0.8) {
           pd.carRig.sirenOn = false;
+          pd.carRig.doorOpen = true;
           this.policeSirenLight.intensity = 0;
           this.sound.setSiren(false);
           pd.phase = 'officers_walking';
-          this.policeStatus = 'Police Officers approaching suspect...';
-          pd.officers[0].root.position.set(-4.5, 0, 15.0);
-          pd.officers[1].root.position.set(-3.2, 0, 16.2);
+          this.policeStatus = 'Officers exiting Armored Security Truck to detain driver...';
+
+          const doorWorldX = pd.xPos - Math.cos(pd.yaw) * 1.45;
+          const doorWorldZ = pd.zPos + Math.sin(pd.yaw) * 1.45;
+          pd.officers[0].root.position.set(doorWorldX, 0, doorWorldZ - 0.5);
+          pd.officers[1].root.position.set(doorWorldX + 0.3, 0, doorWorldZ + 0.5);
           pd.officers[0].root.visible = true;
           pd.officers[1].root.visible = true;
+
+          // If driver is still inside rejected vehicle, open door and step out naturally
+          if (tgt.driverState === 'inside') {
+            tgt.rig.doorOpen = true;
+            tgt.driverState = 'exiting';
+            tgt.driver.root.position.set(tgt.xPos - tgt.rig.halfWidth - 0.35, 0, tgt.zPos - 0.3);
+            tgt.driver.root.visible = true;
+          }
         }
       } else if (pd.phase === 'officers_walking') {
-        const tx = pd.targetX;
-        const tz = pd.targetZ;
+        animateVehicleRig(pd.carRig, dt, 0, 0, true, this.elapsed);
+        const meetX = tgt.xPos - tgt.rig.halfWidth - 1.3;
+        const meetZ = tgt.zPos - 0.4;
         let arrived = true;
         pd.officers.forEach((off, idx) => {
-          const dx = tx + idx * 1.1 - off.root.position.x;
-          const dz = tz - off.root.position.z;
+          const ox = meetX - 0.45 + idx * 0.9;
+          const oz = meetZ - 0.9;
+          const dx = ox - off.root.position.x;
+          const dz = oz - off.root.position.z;
           const dist = Math.hypot(dx, dz);
-          if (dist > 0.5) {
+          if (dist > 0.35) {
             arrived = false;
-            off.root.position.x += (dx / dist) * 2.8 * dt;
-            off.root.position.z += (dz / dist) * 2.8 * dt;
+            off.root.position.x += (dx / dist) * 2.5 * dt;
+            off.root.position.z += (dz / dist) * 2.5 * dt;
             off.root.rotation.y = Math.atan2(dx, dz);
             off.animState = 'walk';
           } else {
+            off.root.rotation.y = Math.atan2(
+              tgt.driver.root.position.x - off.root.position.x,
+              tgt.driver.root.position.z - off.root.position.z
+            );
             off.animState = 'talk';
           }
           updateCharacterAnimation(off, dt);
         });
-        if (arrived) {
-          pd.phase = 'handling';
-          pd.timer = 4.0;
-          this.policeStatus = 'Police Officers verifying case & taking custody...';
-          this.callbacks.onSubtitle('Sgt. Arjun (Police)', '"We are taking over this inspection violation. Thank you, Officer."');
+        if (arrived && tgt.driverState === 'outside') {
+          pd.phase = 'communicating';
+          pd.timer = 3.0;
+          this.policeStatus = 'Police Officers speaking with rejected driver...';
+          setCharacterEmotion(tgt.driver, tgt.caseData.personality === 'frustrated' ? 'frustrated' : 'nervous');
+          tgt.driver.animState = 'talk';
+          this.sound.playDialogueCue(false);
+          this.callbacks.onSubtitle(
+            'Sgt. Arjun (Armored Security)',
+            '"Vehicle rejected for border violation. Step with us to the security transport."'
+          );
         }
-      } else if (pd.phase === 'handling') {
+      } else if (pd.phase === 'communicating') {
+        animateVehicleRig(pd.carRig, dt, 0, 0, true, this.elapsed);
         pd.timer -= dt;
-        pd.officers.forEach((off) => updateCharacterAnimation(off, dt));
+        pd.officers.forEach((off) => updateCharacterAnimation(off, dt, tgt.driver.root.position));
+        if (pd.timer <= 0) {
+          pd.phase = 'escorting';
+          this.policeStatus = 'Officers escorting driver to Armored Security Truck...';
+          this.callbacks.onSubtitle(
+            tgt.caseData.driverName,
+            '"Alright, alright... please watch my truck while I come with you."'
+          );
+        }
+      } else if (pd.phase === 'escorting') {
+        animateVehicleRig(pd.carRig, dt, 0, 0, true, this.elapsed);
+        const boardX = pd.xPos - 1.55;
+        const boardZ = pd.zPos - 0.3;
+
+        // Driver walks alongside officers to the Armored Security Truck door
+        const ddx = boardX - tgt.driver.root.position.x;
+        const ddz = boardZ - tgt.driver.root.position.z;
+        const dDist = Math.hypot(ddx, ddz);
+        if (dDist > 0.35) {
+          tgt.driver.root.position.x += (ddx / dDist) * 2.1 * dt;
+          tgt.driver.root.position.z += (ddz / dDist) * 2.1 * dt;
+          tgt.driver.root.rotation.y = Math.atan2(ddx, ddz);
+          tgt.driver.animState = 'walk';
+          updateCharacterAnimation(tgt.driver, dt);
+        } else {
+          tgt.driver.animState = 'idle';
+        }
+
+        let officersAtTruck = true;
+        pd.officers.forEach((off, idx) => {
+          const ox = boardX - 0.55 + idx * 1.1;
+          const oz = boardZ + (idx === 0 ? -0.9 : 0.9);
+          const dx = ox - off.root.position.x;
+          const dz = oz - off.root.position.z;
+          const dist = Math.hypot(dx, dz);
+          if (dist > 0.35) {
+            officersAtTruck = false;
+            off.root.position.x += (dx / dist) * 2.25 * dt;
+            off.root.position.z += (dz / dist) * 2.25 * dt;
+            off.root.rotation.y = Math.atan2(dx, dz);
+            off.animState = 'walk';
+          } else {
+            off.animState = 'idle';
+          }
+          updateCharacterAnimation(off, dt);
+        });
+
+        if (dDist <= 0.35 && officersAtTruck) {
+          pd.phase = 'boarding';
+          pd.timer = 1.25;
+          this.policeStatus = 'Driver & officers boarding Armored Security Truck...';
+          tgt.driver.root.visible = false;
+          tgt.driverState = 'inside';
+          pd.officers[0].root.visible = false;
+          pd.officers[1].root.visible = false;
+          pd.carRig.doorOpen = false;
+          this.sound.playCargoLatch();
+        }
+      } else if (pd.phase === 'boarding') {
+        animateVehicleRig(pd.carRig, dt, 0, 0, true, this.elapsed);
+        pd.timer -= dt;
         if (pd.timer <= 0) {
           pd.phase = 'departing';
-          this.policeStatus = 'Case Resolved by Police Unit.';
-          if (this.holdingActor) {
-            this.callbacks.onInspectionFinished(this.holdingActor.caseData, 'police_handled');
-            this.scene.remove(this.holdingActor.rig.root, this.holdingActor.driver.root);
-            disposeVehicleRig(this.holdingActor.rig);
-            this.holdingActor = null;
-          }
-          this.scene.remove(pd.officers[0].root, pd.officers[1].root);
-          pd.timer = 2.0;
+          pd.departStep = 0;
+          pd.carRig.indicatorState = 1;
+          this.exitGateOpen = true;
+          this.policeStatus = 'Armored Security Truck departing with driver in custody...';
         }
       } else if (pd.phase === 'departing') {
-        pd.carRig.root.position.z += 12 * dt;
-        animateVehicleRig(pd.carRig, dt, 12, 0, false, this.elapsed);
-        if (pd.carRig.root.position.z > 65) {
-          this.scene.remove(pd.carRig.root);
+        const wps: [number, number][] = [
+          [7.2, Math.max(-2, pd.stopZ - 6.5)],
+          [7.2, Math.max(8, pd.stopZ + 3.5)],
+          [2.8, 19.5],
+          [2.8, 65.0],
+        ];
+        const wp = wps[Math.min(pd.departStep, wps.length - 1)];
+        const spd = pd.departStep < 2 ? 7.5 : 11.5;
+        const res = driveTowardWaypoint(pd.xPos, pd.zPos, pd.yaw, wp[0], wp[1], spd, 2.3);
+        pd.xPos = res.x;
+        pd.zPos = res.z;
+        pd.yaw = res.yaw;
+        pd.carRig.root.position.set(pd.xPos, 0, pd.zPos);
+        pd.carRig.root.rotation.y = pd.yaw;
+        animateVehicleRig(pd.carRig, dt, spd, res.steer, false, this.elapsed);
+
+        if (res.dist < 1.2 && pd.departStep < wps.length - 1) {
+          pd.departStep++;
+          if (pd.departStep >= 2) pd.carRig.indicatorState = 0;
+        }
+        if (pd.zPos > 62) {
+          this.scene.remove(pd.carRig.root, pd.officers[0].root, pd.officers[1].root);
           disposeVehicleRig(pd.carRig);
           this.policeDispatch = null;
-          this.policeStatus = null;
+          this.exitGateOpen = false;
+
+          if (this.rejectedActor) {
+            this.towRequestAvailable = true;
+            this.policeStatus = 'Driver Removed · Request Police Tow Truck (Computer / Radio)';
+            this.callbacks.onToast(
+              'Police departed with driver! Open Computer or Radio to request the Police Tow Truck.'
+            );
+          } else {
+            if (this.holdingActor === tgt) {
+              this.callbacks.onInspectionFinished(tgt.caseData, 'police_handled', 'Handled by Armored Security Unit.');
+              this.scene.remove(tgt.rig.root, tgt.driver.root);
+              disposeVehicleRig(tgt.rig);
+              this.holdingActor = null;
+            }
+            this.policeStatus = null;
+          }
         }
       }
-    } else if (this.policeSirenLight.intensity !== 0) {
+    } else if (!this.towDispatch?.active && this.policeSirenLight.intensity !== 0) {
       this.policeSirenLight.intensity = 0;
+    }
+
+    // Police Tow Truck Arrival, Positioning, Winch Hitch, Lift & Physical Towing Sequence
+    if (this.towDispatch?.active) {
+      const td = this.towDispatch;
+      const rej = td.targetActor;
+      if (td.towRig.sirenOn) {
+        const sirenPhase = Math.sin(this.elapsed * 12) > 0;
+        this.policeSirenLight.position.set(td.xPos, 2.7, td.zPos);
+        this.policeSirenLight.intensity = 3.6;
+        this.policeSirenLight.color.setHex(sirenPhase ? 0xf59e0b : 0x3b82f6);
+      }
+
+      const hitchDist = rej.rig.halfLength + td.towRig.halfLength + 0.55;
+      const hitchZ = rej.zPos + hitchDist;
+
+      if (td.phase === 'arriving') {
+        const wps: [number, number][] = [
+          [4.2, Math.max(12, rej.zPos + 13)],
+          [6.2, rej.zPos + 4.5],
+          [rej.xPos + 0.2, hitchZ + 6.0],
+        ];
+        const wp = wps[Math.min(td.waypointIdx, wps.length - 1)];
+        const spd = td.waypointIdx === 0 ? 9.0 : 6.8;
+        const res = driveTowardWaypoint(td.xPos, td.zPos, td.yaw, wp[0], wp[1], spd, 2.4);
+        td.xPos = res.x;
+        td.zPos = res.z;
+        td.yaw = res.yaw;
+        td.towRig.root.position.set(td.xPos, 0, td.zPos);
+        td.towRig.root.rotation.y = td.yaw;
+        animateVehicleRig(td.towRig, dt, spd, res.steer, false, this.elapsed);
+
+        if (res.dist < 1.1) {
+          if (td.waypointIdx < wps.length - 1) {
+            td.waypointIdx++;
+          } else {
+            td.phase = 'turning';
+            this.towStatus = 'Police Tow Truck aligning ahead of rejected vehicle...';
+          }
+        }
+      } else if (td.phase === 'turning') {
+        // Rotate smoothly in place/arc to face +Z (yaw = Math.PI) before reversing onto hitch
+        const targetYaw = Math.PI;
+        const diff = Math.atan2(Math.sin(targetYaw - td.yaw), Math.cos(targetYaw - td.yaw));
+        td.yaw += THREE.MathUtils.clamp(diff, -2.0 * dt, 2.0 * dt);
+        td.xPos = THREE.MathUtils.damp(td.xPos, rej.xPos, 3.0, dt);
+        td.towRig.root.position.set(td.xPos, 0, td.zPos);
+        td.towRig.root.rotation.y = td.yaw;
+        animateVehicleRig(td.towRig, dt, 2.2, Math.sign(diff) * 0.4, false, this.elapsed);
+
+        if (Math.abs(diff) < 0.06 && Math.abs(td.xPos - rej.xPos) < 0.15) {
+          td.yaw = Math.PI;
+          td.xPos = rej.xPos;
+          td.phase = 'positioning';
+          td.towRig.indicatorState = -1;
+          this.towStatus = 'Tow Truck backing up to rejected vehicle front bumper...';
+        }
+      } else if (td.phase === 'positioning') {
+        if (td.zPos > hitchZ + 0.08) {
+          const revSpd = Math.min(2.6, Math.max(0.8, (td.zPos - hitchZ) * 1.4));
+          td.zPos -= revSpd * dt;
+          td.towRig.root.position.set(td.xPos, 0, td.zPos);
+          td.towRig.root.rotation.y = td.yaw;
+          animateVehicleRig(td.towRig, dt, -revSpd, 0, false, this.elapsed);
+        } else {
+          td.zPos = hitchZ;
+          td.towRig.root.position.set(td.xPos, 0, td.zPos);
+          td.phase = 'attaching';
+          td.timer = 1.6;
+          td.towRig.towDeployed = true;
+          this.sound.playTowHitch();
+          this.towStatus = 'Lowering hydraulic boom & connecting winch to rejected vehicle...';
+        }
+      } else if (td.phase === 'attaching') {
+        animateVehicleRig(td.towRig, dt, 0, 0, true, this.elapsed);
+        td.timer -= dt;
+        if (td.timer <= 0) {
+          td.phase = 'lifting';
+          td.timer = 1.25;
+          rej.rig.isTowed = true;
+          this.exitGateOpen = true;
+          this.sound.playGate();
+          this.towStatus = 'Lifting front axle onto wheel-lift cradle...';
+        }
+      } else if (td.phase === 'lifting') {
+        animateVehicleRig(td.towRig, dt, 0, 0, true, this.elapsed);
+        animateVehicleRig(rej.rig, dt, 0, 0, false, this.elapsed);
+        td.timer -= dt;
+        if (td.timer <= 0) {
+          td.phase = 'towing';
+          td.towRig.indicatorState = 0;
+          this.towStatus = 'Towing attached rejected vehicle out of checkpoint...';
+        }
+      } else if (td.phase === 'towing') {
+        const res = driveTowardWaypoint(td.xPos, td.zPos, td.yaw, 0, 68, 7.6, 1.4);
+        td.xPos = res.x;
+        td.zPos = res.z;
+        td.yaw = res.yaw;
+        td.towRig.root.position.set(td.xPos, 0, td.zPos);
+        td.towRig.root.rotation.y = td.yaw;
+        animateVehicleRig(td.towRig, dt, 7.6, res.steer, false, this.elapsed);
+
+        // Physically transport the attached rejected vehicle directly behind the wheel-lift cradle
+        const fwdX = -Math.sin(td.yaw);
+        const fwdZ = -Math.cos(td.yaw);
+        rej.xPos = td.xPos - fwdX * hitchDist;
+        rej.zPos = td.zPos - fwdZ * hitchDist;
+        rej.yaw = td.yaw;
+        rej.rig.root.position.set(rej.xPos, 0, rej.zPos);
+        rej.rig.root.rotation.y = rej.yaw;
+        animateVehicleRig(rej.rig, dt, 7.6, 0, false, this.elapsed);
+
+        if (rej.zPos > 60) {
+          this.scene.remove(td.towRig.root, rej.rig.root, rej.driver.root);
+          disposeVehicleRig(td.towRig);
+          disposeVehicleRig(rej.rig);
+          this.towDispatch = null;
+          this.rejectedActor = null;
+          this.towStatus = null;
+          this.towRequestAvailable = false;
+          this.policeStatus = null;
+          this.redRejectionAlert = null;
+          this.policeSirenLight.intensity = 0;
+          this.exitGateOpen = false;
+          this.sound.playGate();
+
+          if (this.queue.length > 0) {
+            this.currentAlert = {
+              vehicleLabel: this.queue[0].caseData.vehicleLabel,
+              registration: this.queue[0].caseData.registration,
+              lane: 1,
+              queuePosition: 1,
+              status: 'Waiting for Gate Access',
+              totalWaiting: this.queue.length,
+            };
+            this.alarmActive = true;
+            this.sound.startArrivalAlarm();
+            updateOfficeMonitorScreen(this.world, this.currentAlert, true);
+          } else {
+            this.currentAlert = null;
+            updateOfficeMonitorScreen(this.world, null, false);
+          }
+          this.callbacks.onToast('Rejected vehicle towed away! Checkpoint lane is now clear.');
+        }
+      }
     }
   }
 
@@ -1391,7 +1963,11 @@ export class SimulationEngine {
 
     if (!this.paused) {
       const hoursDelta = (dt / 60) * 0.8;
-      this.timeOfDay = (this.timeOfDay + hoursDelta) % 24;
+      let nextTime = (this.timeOfDay + hoursDelta) % 24;
+      if (nextTime >= 4.0 && nextTime < 21.0) {
+        nextTime = 21.0;
+      }
+      this.timeOfDay = nextTime;
       this.timeSyncAccum += hoursDelta;
       if (this.timeSyncAccum >= 0.014) {
         this.callbacks.onTimeAdvance(this.timeSyncAccum);
@@ -1450,33 +2026,43 @@ export class SimulationEngine {
     this.world.clockHands.minute.rotation.z = -(mins / 60) * Math.PI * 2;
     this.world.clockHands.second.rotation.z = -this.elapsed * 0.5;
 
-    // Day/Night, Golden Hour & Weather Lighting (zero per-frame allocations!)
-    const sunElev = Math.sin(((this.timeOfDay - 6) / 24) * Math.PI * 2);
-    const dayFactor = THREE.MathUtils.clamp((sunElev + 0.15) / 0.45, 0, 1);
-    const goldenFactor = Math.max(0, 1 - Math.abs(sunElev) * 4.5) * (this.weather === 'clear' ? 1 : 0.35);
-    const isNight = dayFactor < 0.38;
-    const weatherDim = this.weather === 'rain' ? 0.6 : this.weather === 'cloudy' || this.weather === 'fog' ? 0.75 : 1.0;
+    // Permanent Night-Shift Moonlit Atmosphere & Checkpoint Floodlighting
+    const isNight = true;
+    const weatherDim = this.weather === 'rain' ? 0.72 : this.weather === 'cloudy' || this.weather === 'fog' ? 0.82 : 1.0;
 
-    this.sunLight.intensity = dayFactor * 1.8 * weatherDim;
-    this.sunLight.color.copy(_sunBaseCol).lerp(_sunGoldenCol, goldenFactor * 0.7);
-    this.hemiLight.intensity = (0.35 + dayFactor * 0.55) * weatherDim;
+    // Subtle cool silver-blue moonlight keeps mountains, trees & shadows crisp at night
+    this.sunLight.intensity = 0.42 * weatherDim;
+    this.sunLight.color.setHex(0xb8d4f4);
+    this.hemiLight.intensity = 0.56 * weatherDim;
+    this.rimLight.intensity = 0.28 * weatherDim;
+    this.scene.environmentIntensity = 0.36 * weatherDim;
 
-    // Position Sun / Moon Disc in sky
-    const sunOrbitAngle = ((this.timeOfDay - 6) / 24) * Math.PI * 2;
-    this.world.sunDisc.position.set(
-      Math.cos(sunOrbitAngle) * 115,
-      Math.max(12, Math.sin(sunOrbitAngle) * 95),
-      -65
-    );
+    // Position Moon high in the starry night sky
+    const nightProgress = this.timeOfDay >= 21 ? this.timeOfDay - 21 : this.timeOfDay + 3; // 0..7h
+    const moonAngle = 0.65 + (nightProgress / 7) * 1.4;
+    const moonX = Math.cos(moonAngle) * 115;
+    const moonY = Math.max(42, Math.sin(moonAngle) * 95);
+    const moonZ = -70;
+    this.world.sunDisc.position.set(moonX, moonY, moonZ);
     this.world.sunDisc.lookAt(this.camera.position);
-    (this.world.sunDisc.material as THREE.MeshBasicMaterial).color.setHex(
-      isNight ? 0xe2e8f0 : goldenFactor > 0.35 ? 0xfdba74 : 0xfef08a
-    );
+    (this.world.sunDisc.material as THREE.MeshBasicMaterial).color.setHex(0xe2e8f0);
+    this.sunLight.position.set(moonX * 0.55, moonY * 0.75, moonZ * 0.55);
 
-    _skyWorkCol
-      .copy(_skyNightCol)
-      .lerp(this.weather === 'rain' || this.weather === 'fog' ? _skyStormCol : _skyClearCol, dayFactor)
-      .lerp(_skyGoldenCol, goldenFactor * 0.45);
+    const isStormy = this.weather === 'rain' || this.weather === 'fog';
+    if (isStormy) _skyWorkCol.setHex(0x0f172a);
+    else _skyWorkCol.copy(_skyNightCol);
+    _skyZenithWorkCol.copy(_skyZenithNightCol);
+
+    this.skyMesh.position.copy(this.camera.position);
+    this.skyMat.uniforms.uZenithColor.value.copy(_skyZenithWorkCol);
+    this.skyMat.uniforms.uHorizonColor.value.copy(_skyWorkCol);
+    this.skyMat.uniforms.uSunDir.value.set(moonX, moonY, moonZ).normalize();
+    this.skyMat.uniforms.uSunColor.value.setHex(0xcbd5e1);
+    this.skyMat.uniforms.uNightAmount.value = 1.0;
+    this.skyMat.uniforms.uCloudAmount.value =
+      this.weather === 'cloudy' ? 0.78 : isStormy ? 0.92 : 0.34;
+    this.skyMat.uniforms.uTime.value = this.elapsed;
+
     if (this.scene.background instanceof THREE.Color) {
       this.scene.background.copy(_skyWorkCol);
     }
@@ -1484,9 +2070,14 @@ export class SimulationEngine {
       this.scene.fog.color.copy(_skyWorkCol);
       this.scene.fog.far = this.weather === 'fog' ? 75 : this.settings.graphics.renderDistance;
     }
-    const nlTarget = isNight ? 2.6 : 0.65;
+    const nlTarget = 3.2;
     for (const nl of this.world.nightLights) {
-      if (nl.intensity !== nlTarget) nl.intensity = nlTarget;
+      const target = nl === this.world.officeLamp ? (this.officeLightOn ? 2.4 : 0) : nlTarget;
+      if (nl.intensity !== target) nl.intensity = target;
+    }
+    const fixEmissive = 1.65;
+    for (const fm of this.world.emissiveNightFixtures) {
+      if (fm.emissiveIntensity !== fixEmissive) fm.emissiveIntensity = fixEmissive;
     }
 
     // Animate stationed border sentries only when nearby
@@ -1545,17 +2136,32 @@ export class SimulationEngine {
         waitingCount: this.queue.length,
         activeCase: this.activeActor?.caseData ?? null,
         holdingCase: this.holdingActor?.caseData ?? null,
+        rejectedCase: this.rejectedActor?.caseData ?? null,
+        redRejectionAlert: this.redRejectionAlert,
+        towAvailable: this.towRequestAvailable,
+        towStatus: this.towStatus,
         entryGateOpen: this.entryGateOpen,
         exitGateOpen: this.exitGateOpen,
         policeStatus: this.policeStatus,
         fps: this.currentFps,
-        driverOutside: (this.activeActor?.driverState === 'outside') || (this.holdingActor?.driverState === 'outside'),
+        driverOutside:
+          this.activeActor?.driverState === 'outside' ||
+          this.holdingActor?.driverState === 'outside' ||
+          this.rejectedActor?.driverState === 'outside',
         playerX: Math.round(this.playerPos.x * 10) / 10,
         playerZ: Math.round(this.playerPos.z * 10) / 10,
         playerYaw: Math.round(this.playerYaw * 20) / 20,
         queueCountNear: queueNear,
-        policeX: this.policeDispatch?.active ? Math.round(this.policeDispatch.carRig.root.position.x * 10) / 10 : null,
-        policeZ: this.policeDispatch?.active ? Math.round(this.policeDispatch.carRig.root.position.z * 10) / 10 : null,
+        policeX: this.policeDispatch?.active
+          ? Math.round(this.policeDispatch.xPos * 10) / 10
+          : this.towDispatch?.active
+          ? Math.round(this.towDispatch.xPos * 10) / 10
+          : null,
+        policeZ: this.policeDispatch?.active
+          ? Math.round(this.policeDispatch.zPos * 10) / 10
+          : this.towDispatch?.active
+          ? Math.round(this.towDispatch.zPos * 10) / 10
+          : null,
       });
     }
 
@@ -1594,11 +2200,8 @@ export class SimulationEngine {
     window.removeEventListener('resize', this.onResize);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
-    document.removeEventListener('pointerlockchange', this.onPointerLockChange);
-    document.removeEventListener('pointerlockerror', this.onPointerLockError);
+    window.removeEventListener('blur', this.onWindowBlur);
     this.renderer.domElement.removeEventListener('mousedown', this.onMouseDown);
-    window.removeEventListener('mouseup', this.onMouseUp);
-    window.removeEventListener('mousemove', this.onMouseMove);
     this.sound.stopArrivalAlarm();
     this.sound.setSiren(false);
     this.renderer.dispose();

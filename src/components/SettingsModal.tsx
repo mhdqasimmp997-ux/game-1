@@ -11,9 +11,9 @@ interface SettingsModalProps {
 
 const PRESET_LABELS: Record<GraphicsPreset, string> = {
   very_low: 'Very Low',
-  low: 'Low (Default)',
+  low: 'Low',
   medium: 'Medium',
-  high: 'High',
+  high: 'High (Default)',
   ultra: 'Ultra',
 };
 
@@ -67,7 +67,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
             <div>
               <h2 className="text-lg font-display font-bold">Graphics, Audio & Control Settings</h2>
               <p className="text-[11px] text-stone-400">
-                Optimized Low Graphics preset tuned for Intel UHD Graphics 610 and integrated GPUs
+                PBR Rendering, Atmospheric Sky & Post-Processing · Presets from Very Low to Ultra
               </p>
             </div>
           </div>
@@ -328,7 +328,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
             <div className="space-y-4 text-xs">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div className="flex items-center justify-between bg-stone-950 border border-stone-800 rounded p-3.5">
-                  <span>Mouse Look Sensitivity ({settings.controls.mouseSensitivity.toFixed(1)}x)</span>
+                  <span>Camera Rotation Sensitivity ({settings.controls.mouseSensitivity.toFixed(1)}x)</span>
                   <input
                     type="range"
                     min={0.3}
@@ -340,7 +340,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
                   />
                 </div>
                 <div className="flex items-center justify-between bg-stone-950 border border-stone-800 rounded p-3.5">
-                  <span>Head Bob & Invert Y</span>
+                  <span>Head Bob & Invert Camera Pitch</span>
                   <div className="flex items-center gap-4">
                     <label className="flex items-center gap-1.5 cursor-pointer">
                       <input
@@ -358,7 +358,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
                         onChange={(e) => updateControls('invertY', e.target.checked)}
                         className="accent-amber-500"
                       />
-                      Invert Y
+                      Invert Up/Down
                     </label>
                   </div>
                 </div>
@@ -366,16 +366,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onChange
 
               <div className="rounded border border-stone-800 bg-stone-950 p-4">
                 <div className="font-semibold text-amber-400 mb-3">
-                  First-Person Controls (Granny-Style Center-Aim Interaction)
+                  First-Person Controls (WASD Movement · Arrow Key Camera · Mouse Interaction)
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5 text-stone-300">
-                  <div><span className="font-mono text-stone-100">Left Mouse Click</span> — Interact with Aimed Object</div>
-                  <div><span className="font-mono text-stone-100">Mouse</span> — Free Look (Center White Dot)</div>
-                  <div><span className="font-mono text-stone-100">W A S D</span> — Walk Around Checkpoint</div>
+                  <div><span className="font-mono text-stone-100">W A S D</span> — Walk Forward / Backward / Left / Right</div>
+                  <div><span className="font-mono text-stone-100">Arrow Keys (↑ ↓ ← →)</span> — Look Up / Down / Turn Left / Right</div>
+                  <div><span className="font-mono text-stone-100">Left Mouse Click</span> — Interact with Aimed Object & Buttons</div>
                   <div><span className="font-mono text-stone-100">Shift / Space / C</span> — Sprint / Jump / Crouch</div>
-                  <div><span className="font-mono text-stone-100">L</span> — Toggle 3D Inspection Lens Mode</div>
-                  <div><span className="font-mono text-stone-100">E</span> — Secondary Interact / Stand Up</div>
-                  <div><span className="font-mono text-stone-100">Esc</span> — Exit CCTV / Pause Menu</div>
+                  <div><span className="font-mono text-stone-100">L / F / B</span> — Inspection Lens / Flashlight / BOLO Orders</div>
+                  <div><span className="font-mono text-stone-100">Esc</span> — Turn Off CCTV / Pause Menu</div>
                 </div>
               </div>
             </div>

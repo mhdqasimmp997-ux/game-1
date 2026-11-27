@@ -13,8 +13,10 @@ import {
   Play,
   ScanSearch,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   Siren,
+  Truck,
 } from 'lucide-react';
 import {
   ActiveModalType,
@@ -22,6 +24,7 @@ import {
   DailyTarget,
   DifficultyLevel,
   InspectionCase,
+  InspectionHistoryEntry,
   PlayerCareerStats,
   SaveSlotData,
 } from './types/game';
@@ -45,7 +48,7 @@ import {
   WeighbridgeModal,
 } from './components/OfficePanels';
 
-const SETTINGS_KEY = 'bp_lowgfx_settings_v1';
+const SETTINGS_KEY = 'bp_graphics_settings_v2';
 const SAVE_PREFIX = 'bp_lowgfx_save_';
 
 function loadStoredSettings(): AllSettings {
@@ -116,6 +119,10 @@ export default function App() {
     waitingCount: 0,
     activeCase: null,
     holdingCase: null,
+    rejectedCase: null,
+    redRejectionAlert: null,
+    towAvailable: false,
+    towStatus: null,
     entryGateOpen: false,
     exitGateOpen: false,
     policeStatus: null,
@@ -177,12 +184,18 @@ export default function App() {
         const raw = localStorage.getItem(SAVE_PREFIX + slotId);
         if (!raw) return;
         const data = JSON.parse(raw) as SaveSlotData;
-        setStats(data.stats);
+        const t = data.stats.timeOfDay;
+        const nightStats: PlayerCareerStats = {
+          ...data.stats,
+          timeOfDay: t >= 4.0 && t < 21.0 ? 22.5 : t,
+          history: data.stats.history ?? [],
+        };
+        setStats(nightStats);
         setDailyTargets(data.dailyTargets);
         setHasStartedShift(true);
         setActiveModal(null);
         engineRef.current?.resetToShiftStart();
-        showToast(`Loaded Day ${data.stats.day} shift.`);
+        showToast(`Loaded Night Shift ${nightStats.day}.`);
       } catch {
         showToast('Failed to read saved shift.');
       }
@@ -191,9 +204,15 @@ export default function App() {
   );
 
   const handleInspectionFinished = useCallback(
-    (caseData: InspectionCase, outcome: 'approved' | 'rejected' | 'police_handled') => {
+    (caseData: InspectionCase, outcome: 'approved' | 'rejected' | 'police_handled', reason?: string) => {
       const hasIssues = caseData.issuesSummary.length > 0;
       const isCommercialTruck = caseData.isCommercial;
+      const recordedReason =
+        reason?.trim() ||
+        caseData.rejectionReason ||
+        (outcome === 'approved'
+          ? 'All weight, document, and cargo checks cleared.'
+          : caseData.issuesSummary[0] ?? 'Checkpoint compliance violation');
 
       let accurate = false;
       let xpGain = 15;
@@ -214,8 +233,8 @@ export default function App() {
         cashDelta = accurate ? 90 : -35;
         showToast(
           accurate
-            ? `Violation Intercepted! (+${xpGain} XP, +$${cashDelta})`
-            : 'Inspection Error: Vehicle had no violations (-$35)'
+            ? `Vehicle Rejected — Police Dispatched! (+${xpGain} XP, +$${cashDelta})`
+            : 'Vehicle Rejected — Police Dispatched (-$35 false flag)'
         );
       } else {
         accurate = hasIssues;
@@ -223,6 +242,16 @@ export default function App() {
         cashDelta = caseData.requiresPolice ? 130 : 50;
         showToast(`Police Unit Resolved Case (+${xpGain} XP, +$${cashDelta})`);
       }
+
+      const historyEntry: InspectionHistoryEntry = {
+        caseId: caseData.caseId,
+        vehicleLabel: caseData.vehicleLabel,
+        registration: caseData.registration,
+        driverName: caseData.driverName,
+        decision: outcome,
+        reason: recordedReason,
+        timestamp: `Shift ${statsRef.current.day} · ${formatClock(statsRef.current.timeOfDay)}`,
+      };
 
       setStats((prev) => ({
         ...prev,
@@ -233,6 +262,7 @@ export default function App() {
         trucksInspected: prev.trucksInspected + (isCommercialTruck ? 1 : 0),
         violationsCaught: prev.violationsCaught + (outcome !== 'approved' && hasIssues ? 1 : 0),
         policeAssistsCalled: prev.policeAssistsCalled + (outcome === 'police_handled' ? 1 : 0),
+        history: [historyEntry, ...(prev.history ?? [])].slice(0, 50),
       }));
 
       setDailyTargets((prev) =>
@@ -271,6 +301,8 @@ export default function App() {
             prev.entryGateOpen === nextHud.entryGateOpen &&
             prev.exitGateOpen === nextHud.exitGateOpen &&
             prev.policeStatus === nextHud.policeStatus &&
+            prev.towAvailable === nextHud.towAvailable &&
+            prev.towStatus === nextHud.towStatus &&
             prev.fps === nextHud.fps &&
             prev.driverOutside === nextHud.driverOutside &&
             prev.playerX === nextHud.playerX &&
@@ -281,6 +313,8 @@ export default function App() {
             prev.policeZ === nextHud.policeZ &&
             prev.activeCase === nextHud.activeCase &&
             prev.holdingCase === nextHud.holdingCase &&
+            prev.rejectedCase === nextHud.rejectedCase &&
+            prev.redRejectionAlert === nextHud.redRejectionAlert &&
             prev.currentAlert === nextHud.currentAlert
           ) {
             return prev;
@@ -313,14 +347,14 @@ export default function App() {
       },
       onTimeAdvance: (hoursDelta) => {
         setStats((s) => {
-          const nextTime = s.timeOfDay + hoursDelta;
-          if (nextTime >= 24) {
+          const nextTime = (s.timeOfDay + hoursDelta) % 24;
+          if (nextTime >= 4.0 && nextTime < 21.0) {
             const nextDay = s.day + 1;
             const weathers = ['clear', 'cloudy', 'rain', 'fog'] as const;
             return {
               ...s,
               day: nextDay,
-              timeOfDay: nextTime % 24,
+              timeOfDay: 21.0,
               weather: weathers[nextDay % weathers.length],
             };
           }
@@ -376,7 +410,7 @@ export default function App() {
 
   const startNewShift = () => {
     soundRef.current?.unlock();
-    setStats({ ...INITIAL_STATS, difficulty: selectedDifficulty });
+    setStats({ ...INITIAL_STATS, difficulty: selectedDifficulty, history: [] });
     setDailyTargets(INITIAL_DAILY_TARGETS.map((t) => ({ ...t })));
     setHasStartedShift(true);
     engineRef.current?.resetToShiftStart();
@@ -384,7 +418,7 @@ export default function App() {
     showToast('Shift begun inside Border Office. Watch for incoming vehicles at Gate 1.');
   };
 
-  const activeInspectionCase = hud.activeCase ?? hud.holdingCase;
+  const activeInspectionCase = hud.activeCase ?? hud.holdingCase ?? hud.rejectedCase;
   const currentRank = RANKS[stats.rankIndex] ?? RANKS[0];
 
   const handleWeighbridgeVerdict = (verdict: 'pass' | 'fail') => {
@@ -432,7 +466,13 @@ export default function App() {
 
       {/* 2. IN-GAME HUD */}
       {activeModal !== 'main_menu' && (
-        <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-4">
+        <div
+          onClickCapture={(e) => {
+            const btn = (e.target as HTMLElement | null)?.closest('button');
+            if (btn) btn.blur();
+          }}
+          className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-4"
+        >
           {/* Top Row */}
           <div className="flex items-start justify-between gap-4">
             {/* Top-Left: Vehicle Arrival Alert & Active Inspection Status */}
@@ -484,11 +524,44 @@ export default function App() {
                 </div>
               )}
 
+              {hud.redRejectionAlert && (
+                <div className="pointer-events-auto rounded border-2 border-rose-500 bg-rose-950/95 px-3.5 py-3 text-xs shadow-2xl space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 font-display font-bold uppercase tracking-wide text-rose-300">
+                      <ShieldAlert className="w-4 h-4 text-rose-400 shrink-0" />
+                      VEHICLE REJECTED — STATUS: REJECTED
+                    </div>
+                    <span className="px-1.5 py-0.5 rounded bg-rose-600 text-white font-mono text-[10px] font-bold">
+                      RED ALERT
+                    </span>
+                  </div>
+                  <div className="text-stone-100">
+                    <strong>{hud.redRejectionAlert.vehicleLabel}</strong> ({hud.redRejectionAlert.registration})
+                  </div>
+                  <div className="text-[11px] text-rose-200">
+                    Reason: {hud.redRejectionAlert.reason}
+                  </div>
+                  {hud.towAvailable && (
+                    <button
+                      onClick={() => engineRef.current?.requestTowTruck()}
+                      className="mt-1 w-full flex items-center justify-center gap-2 py-1.5 px-3 rounded bg-amber-500 hover:bg-amber-400 text-stone-950 font-semibold text-[11px] cursor-pointer"
+                    >
+                      <Truck className="w-3.5 h-3.5" /> Request Police Tow Truck (Unit T-04)
+                    </button>
+                  )}
+                </div>
+              )}
+
               {activeInspectionCase && (
                 <div className="pointer-events-auto rounded border border-stone-700/90 bg-stone-950/92 px-3.5 py-2.5 text-xs space-y-1.5">
                   <div className="flex items-center justify-between gap-2">
                     <span className="font-semibold text-amber-400">
-                      {hud.activeCase ? 'Bay Inspection:' : 'Holding Area:'} {activeInspectionCase.vehicleLabel}
+                      {hud.activeCase
+                        ? 'Bay Inspection:'
+                        : hud.rejectedCase
+                        ? 'Rejected Vehicle:'
+                        : 'Holding Area:'}{' '}
+                      {activeInspectionCase.vehicleLabel}
                     </span>
                     <span className="font-mono text-stone-300">{activeInspectionCase.registration}</span>
                   </div>
@@ -518,13 +591,20 @@ export default function App() {
                   <span>{hud.policeStatus}</span>
                 </div>
               )}
+
+              {hud.towStatus && (
+                <div className="rounded border border-amber-500/60 bg-stone-950/95 px-3.5 py-2 text-xs text-amber-200 flex items-center gap-2">
+                  <Truck className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>{hud.towStatus}</span>
+                </div>
+              )}
             </div>
 
             {/* Top-Right: Shift Stats & Controls + Lens Compartment Checklist */}
             <div className="flex flex-col items-end gap-2">
               <div className="pointer-events-auto flex items-center gap-2.5 rounded border border-stone-700/80 bg-stone-950/92 px-3.5 py-2 text-xs">
                 <div className="font-mono tabular-nums text-stone-200">
-                  Day {stats.day} · {formatClock(stats.timeOfDay)} · <span className="capitalize">{stats.weather}</span>
+                  Night Shift {stats.day} · {formatClock(stats.timeOfDay)} · <span className="capitalize">{stats.weather}</span>
                 </div>
                 <span className="text-stone-700">|</span>
                 <div className="text-stone-300 hidden md:block">{currentRank.name}</div>
@@ -596,7 +676,7 @@ export default function App() {
                     onClick={() => engineRef.current?.toggleCctv(true)}
                     className="px-2.5 py-1 rounded bg-rose-700 hover:bg-rose-600 text-white cursor-pointer"
                   >
-                    Exit CCTV (Esc)
+                    Turn Off CCTV (Esc)
                   </button>
                 </div>
               ) : (
@@ -701,6 +781,14 @@ export default function App() {
                 >
                   <Siren className="w-3.5 h-3.5" /> Police
                 </button>
+                {hud.towAvailable && (
+                  <button
+                    onClick={() => engineRef.current?.requestTowTruck()}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded bg-amber-500 hover:bg-amber-400 text-stone-950 font-semibold cursor-pointer animate-pulse"
+                  >
+                    <Truck className="w-3.5 h-3.5" /> Request Tow Truck
+                  </button>
+                )}
               </div>
             </div>
 
@@ -718,9 +806,10 @@ export default function App() {
                 {/* Entry & Exit Gates */}
                 <line x1="-5" y1="-18" x2="5" y2="-18" stroke={hud.entryGateOpen ? '#22c55e' : '#ef4444'} strokeWidth="1.4" />
                 <line x1="-5" y1="18" x2="5" y2="18" stroke={hud.exitGateOpen ? '#22c55e' : '#ef4444'} strokeWidth="1.4" />
-                {/* Active & Holding & Queued Vehicles */}
+                {/* Active, Rejected, Holding & Queued Vehicles */}
                 {hud.waitingCount > 0 && <rect x="-1.6" y="-27" width="3.2" height="6" fill="#fbbf24" rx="0.5" />}
                 {hud.activeCase && <rect x="-1.7" y="-3.2" width="3.4" height="6.4" fill="#38bdf8" rx="0.5" />}
+                {hud.rejectedCase && <rect x="-1.8" y="-3.4" width="3.6" height="6.8" fill="#ef4444" rx="0.5" />}
                 {hud.holdingCase && <rect x="11.8" y="1" width="3.4" height="6.4" fill="#fb7185" rx="0.5" />}
                 {hud.policeX !== null && hud.policeZ !== null && (
                   <circle cx={hud.policeX} cy={hud.policeZ} r="2.0" fill="#3b82f6" />
@@ -742,7 +831,7 @@ export default function App() {
           <div className="max-w-lg space-y-6">
             <div className="space-y-2">
               <div className="text-xs font-mono uppercase tracking-widest text-amber-400">
-                Checkpoint Sector 7 · Low-Graphics Optimized Engine
+                Checkpoint Sector 7 · High-Detail PBR Simulation
               </div>
               <h1 className="text-4xl sm:text-5xl font-display font-bold tracking-tight text-stone-50">
                 Border Patrol Simulator
@@ -802,7 +891,7 @@ export default function App() {
             </div>
 
             <div className="text-xs text-stone-400 pt-2 border-t border-stone-800/80">
-              Center-Aim Interaction: Point the white dot at doors, computer, CCTV, gate panels, vehicle doors, or drivers and Left-Click · WASD Move · [L] Lens Mode · Esc Pause
+              Controls: WASD Walk · Arrow Keys (↑↓←→) Camera Look & Turn · Aim Crosshair & Left Mouse Click to Interact · [L] Lens · [F] Light · Esc Pause
             </div>
           </div>
         </div>
@@ -859,10 +948,15 @@ export default function App() {
           entryGateOpen={hud.entryGateOpen}
           exitGateOpen={hud.exitGateOpen}
           policeStatus={hud.policeStatus}
+          towAvailable={hud.towAvailable}
+          towStatus={hud.towStatus}
+          redRejectionAlert={hud.redRejectionAlert}
+          inspectionHistory={stats.history}
           onAcknowledgeAlarm={() => engineRef.current?.acknowledgeAlarm()}
           onToggleEntryGate={() => engineRef.current?.toggleEntryGate()}
           onToggleExitGate={() => engineRef.current?.toggleExitGate()}
           onCallPolice={() => engineRef.current?.requestPoliceAssistance()}
+          onRequestTowTruck={() => engineRef.current?.requestTowTruck()}
           onBuyRapidWeigh={() => {
             if (stats.cash < 220) return;
             soundRef.current?.playStamp(true);

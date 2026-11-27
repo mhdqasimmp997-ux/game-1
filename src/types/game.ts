@@ -27,7 +27,11 @@ export type VehicleType =
   | 'livestock_truck'
   | 'bus'
   | 'tourist_bus'
-  | 'police_car';
+  | 'police_car'
+  | 'armored_security'
+  | 'green_heavy_truck'
+  | 'green_covered_truck'
+  | 'police_tow_truck';
 
 export type DriverPersonality =
   | 'friendly'
@@ -169,6 +173,18 @@ export interface InspectionCase {
   physicalVerdict: 'pending' | 'clear' | 'issues_found';
   recordedFindings: string[];
   finalDecision: 'pending' | 'approved' | 'rejected' | 'further_inspection';
+  status?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'HOLDING';
+  rejectionReason?: string;
+}
+
+export interface InspectionHistoryEntry {
+  caseId: string;
+  vehicleLabel: string;
+  registration: string;
+  driverName: string;
+  decision: 'approved' | 'rejected' | 'police_handled';
+  reason: string;
+  timestamp: string;
 }
 
 export interface QueueAlertInfo {
@@ -209,6 +225,7 @@ export interface PlayerCareerStats {
     uvScanner: boolean;
     rapidWeigh: boolean;
   };
+  history: InspectionHistoryEntry[];
 }
 
 export interface SaveSlotData {

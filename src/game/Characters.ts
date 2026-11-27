@@ -39,39 +39,62 @@ const JACKET_COLORS: Record<CharacterRole, number[]> = {
   story_npc: [0x1f3628, 0x1e3a5f],
 };
 
-// Shared cached geometries & materials across all characters
+// Shared cached geometries & PBR materials across all characters
 const SHARED_CHAR_GEO = {
-  leg: new THREE.CylinderGeometry(0.08, 0.068, 0.78, 7),
-  shoe: new THREE.BoxGeometry(0.13, 0.09, 0.22),
+  leg: new THREE.CylinderGeometry(0.084, 0.068, 0.78, 10),
+  shoe: new THREE.BoxGeometry(0.135, 0.095, 0.23),
   torso: new THREE.BoxGeometry(0.42, 0.58, 0.24),
-  badge: new THREE.BoxGeometry(0.07, 0.08, 0.02),
-  arm: new THREE.CylinderGeometry(0.06, 0.052, 0.52, 7),
-  hand: new THREE.SphereGeometry(0.055, 6, 6),
-  head: new THREE.SphereGeometry(0.145, 9, 8),
-  eye: new THREE.SphereGeometry(0.017, 5, 5),
-  brow: new THREE.BoxGeometry(0.044, 0.013, 0.015),
+  collar: new THREE.CylinderGeometry(0.11, 0.14, 0.09, 10),
+  belt: new THREE.BoxGeometry(0.435, 0.055, 0.255),
+  buckle: new THREE.BoxGeometry(0.075, 0.055, 0.02),
+  hiVisBand: new THREE.BoxGeometry(0.43, 0.05, 0.25),
+  shoulder: new THREE.SphereGeometry(0.072, 8, 8),
+  badge: new THREE.BoxGeometry(0.065, 0.078, 0.02),
+  arm: new THREE.CylinderGeometry(0.062, 0.05, 0.52, 10),
+  hand: new THREE.SphereGeometry(0.055, 8, 8),
+  head: new THREE.SphereGeometry(0.145, 14, 12),
+  nose: new THREE.BoxGeometry(0.028, 0.044, 0.032),
+  sclera: new THREE.SphereGeometry(0.022, 8, 6),
+  eye: new THREE.SphereGeometry(0.014, 8, 6),
+  brow: new THREE.BoxGeometry(0.046, 0.013, 0.015),
   mouth: new THREE.BoxGeometry(0.056, 0.016, 0.016),
-  cap: new THREE.CylinderGeometry(0.15, 0.14, 0.09, 9),
-  visor: new THREE.BoxGeometry(0.22, 0.02, 0.12),
-  hair: new THREE.SphereGeometry(0.148, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.58),
+  cap: new THREE.CylinderGeometry(0.156, 0.142, 0.095, 14),
+  capCrest: new THREE.CylinderGeometry(0.025, 0.025, 0.02, 8),
+  visor: new THREE.BoxGeometry(0.22, 0.022, 0.125),
+  hair: new THREE.SphereGeometry(0.15, 12, 8, 0, Math.PI * 2, 0, Math.PI * 0.58),
   hitbox: new THREE.BoxGeometry(0.65, 1.85, 0.55),
+  shadowDisc: new THREE.CircleGeometry(0.32, 12),
 };
 
-const SHARED_SHOE_MAT = new THREE.MeshLambertMaterial({ color: 0x171717 });
-const SHARED_EYE_MAT = new THREE.MeshLambertMaterial({ color: 0x111827 });
-const SHARED_BADGE_MAT = new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.7, roughness: 0.3 });
+const SHARED_SHOE_MAT = new THREE.MeshStandardMaterial({ color: 0x171717, roughness: 0.48, metalness: 0.1 });
+const SHARED_SCLERA_MAT = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.35 });
+const SHARED_EYE_MAT = new THREE.MeshStandardMaterial({ color: 0x0f172a, roughness: 0.15 });
+const SHARED_BADGE_MAT = new THREE.MeshStandardMaterial({ color: 0xfbbf24, metalness: 0.85, roughness: 0.22 });
+const SHARED_HI_VIS_MAT = new THREE.MeshStandardMaterial({
+  color: 0xfacc15,
+  emissive: 0xca8a04,
+  emissiveIntensity: 0.22,
+  roughness: 0.4,
+});
+const SHARED_SHADOW_MAT = new THREE.MeshBasicMaterial({
+  color: 0x000000,
+  transparent: true,
+  opacity: 0.32,
+  depthWrite: false,
+});
 const SHARED_HITBOX_MAT = new THREE.MeshBasicMaterial({ visible: false });
-const MOUTH_NEUTRAL_MAT = new THREE.MeshLambertMaterial({ color: 0x7c3a32 });
-const MOUTH_HAPPY_MAT = new THREE.MeshLambertMaterial({ color: 0xc2410c });
-const MOUTH_SAD_MAT = new THREE.MeshLambertMaterial({ color: 0x57302a });
-const MOUTH_ANGRY_MAT = new THREE.MeshLambertMaterial({ color: 0x451a1a });
+const MOUTH_NEUTRAL_MAT = new THREE.MeshStandardMaterial({ color: 0x7c3a32, roughness: 0.65 });
+const MOUTH_HAPPY_MAT = new THREE.MeshStandardMaterial({ color: 0xc2410c, roughness: 0.55 });
+const MOUTH_SAD_MAT = new THREE.MeshStandardMaterial({ color: 0x57302a, roughness: 0.65 });
+const MOUTH_ANGRY_MAT = new THREE.MeshStandardMaterial({ color: 0x451a1a, roughness: 0.65 });
 
-const lambertCache = new Map<number, THREE.MeshLambertMaterial>();
-function getSharedLambert(hex: number): THREE.MeshLambertMaterial {
-  let m = lambertCache.get(hex);
+const pbrClothCache = new Map<number, THREE.MeshStandardMaterial>();
+function getSharedCloth(hex: number, roughness = 0.82): THREE.MeshStandardMaterial {
+  const key = (hex << 8) | Math.round(roughness * 100);
+  let m = pbrClothCache.get(key);
   if (!m) {
-    m = new THREE.MeshLambertMaterial({ color: hex });
-    lambertCache.set(hex, m);
+    m = new THREE.MeshStandardMaterial({ color: hex, roughness, metalness: 0.04 });
+    pbrClothCache.set(key, m);
   }
   return m;
 }
@@ -86,13 +109,19 @@ export function createCharacterMesh(
   const root = new THREE.Group();
   const s = Math.abs(seed);
 
-  const skinMat = getSharedLambert(SKIN_TONES[s % SKIN_TONES.length]);
+  const skinMat = getSharedCloth(SKIN_TONES[s % SKIN_TONES.length], 0.62);
   const jacketList = JACKET_COLORS[role] ?? JACKET_COLORS.driver;
-  const jacketMat = getSharedLambert(jacketList[s % jacketList.length]);
-  const pantsMat = getSharedLambert(role === 'police_officer' ? 0x172033 : 0x293241);
-  const hairMat = getSharedLambert(HAIR_TONES[s % HAIR_TONES.length]);
+  const jacketMat = getSharedCloth(jacketList[s % jacketList.length], 0.82);
+  const pantsMat = getSharedCloth(role === 'police_officer' ? 0x172033 : 0x293241, 0.86);
+  const hairMat = getSharedCloth(HAIR_TONES[s % HAIR_TONES.length], 0.72);
 
-  // Legs
+  // Soft Ground Shadow Disc
+  const shadowDisc = new THREE.Mesh(SHARED_CHAR_GEO.shadowDisc, SHARED_SHADOW_MAT);
+  shadowDisc.rotation.x = -Math.PI / 2;
+  shadowDisc.position.y = 0.025;
+  root.add(shadowDisc);
+
+  // Legs + Boots
   const leftLegPivot = new THREE.Group();
   leftLegPivot.position.set(-0.11, 0.86, 0);
   const rightLegPivot = new THREE.Group();
@@ -101,40 +130,54 @@ export function createCharacterMesh(
   [leftLegPivot, rightLegPivot].forEach((pivot) => {
     const leg = new THREE.Mesh(SHARED_CHAR_GEO.leg, pantsMat);
     leg.position.y = -0.39;
+    leg.castShadow = true;
     const shoe = new THREE.Mesh(SHARED_CHAR_GEO.shoe, SHARED_SHOE_MAT);
-    shoe.position.set(0, -0.815, 0.035);
+    shoe.position.set(0, -0.815, 0.038);
     pivot.add(leg, shoe);
     root.add(pivot);
   });
 
-  // Torso
+  // Torso + Collar + Belt + Buckle
   const torsoGroup = new THREE.Group();
   torsoGroup.position.set(0, 0.86, 0);
   const torsoMesh = new THREE.Mesh(SHARED_CHAR_GEO.torso, jacketMat);
   torsoMesh.position.y = 0.29;
-  torsoGroup.add(torsoMesh);
+  torsoMesh.castShadow = true;
+  const collar = new THREE.Mesh(SHARED_CHAR_GEO.collar, jacketMat);
+  collar.position.y = 0.59;
+  const belt = new THREE.Mesh(SHARED_CHAR_GEO.belt, SHARED_SHOE_MAT);
+  belt.position.y = 0.04;
+  const buckle = new THREE.Mesh(SHARED_CHAR_GEO.buckle, SHARED_BADGE_MAT);
+  buckle.position.set(0, 0.04, 0.13);
+  torsoGroup.add(torsoMesh, collar, belt, buckle);
 
   if (role === 'police_officer' || role === 'border_officer') {
     const badge = new THREE.Mesh(SHARED_CHAR_GEO.badge, SHARED_BADGE_MAT);
     badge.position.set(0.12, 0.42, 0.125);
     torsoGroup.add(badge);
   }
+  if (role === 'border_officer' || role === 'trucker') {
+    const hiVis = new THREE.Mesh(SHARED_CHAR_GEO.hiVisBand, SHARED_HI_VIS_MAT);
+    hiVis.position.y = 0.22;
+    torsoGroup.add(hiVis);
+  }
 
-  // Arms
+  // Arms with Shoulder Joints & Hands
   const leftArmPivot = new THREE.Group();
   leftArmPivot.position.set(-0.27, 0.52, 0);
   const rightArmPivot = new THREE.Group();
   rightArmPivot.position.set(0.27, 0.52, 0);
   [leftArmPivot, rightArmPivot].forEach((armPiv) => {
+    const shoulder = new THREE.Mesh(SHARED_CHAR_GEO.shoulder, jacketMat);
     const arm = new THREE.Mesh(SHARED_CHAR_GEO.arm, jacketMat);
     arm.position.y = -0.24;
     const hand = new THREE.Mesh(SHARED_CHAR_GEO.hand, skinMat);
     hand.position.y = -0.52;
-    armPiv.add(arm, hand);
+    armPiv.add(shoulder, arm, hand);
     torsoGroup.add(armPiv);
   });
 
-  // Head & Expressive Face
+  // Head & Expressive Face (with sclera, iris, nose bridge & peaked officer cap)
   const headPivot = new THREE.Group();
   headPivot.position.set(0, 0.62, 0);
   const headMesh = new THREE.Mesh(SHARED_CHAR_GEO.head, skinMat);
@@ -142,26 +185,38 @@ export function createCharacterMesh(
   headMesh.scale.set(0.92, 1.08, 0.96);
   headPivot.add(headMesh);
 
+  const nose = new THREE.Mesh(SHARED_CHAR_GEO.nose, skinMat);
+  nose.position.set(0, 0.155, 0.138);
+  headPivot.add(nose);
+
+  const leftSclera = new THREE.Mesh(SHARED_CHAR_GEO.sclera, SHARED_SCLERA_MAT);
+  leftSclera.position.set(-0.048, 0.185, 0.122);
+  const rightSclera = new THREE.Mesh(SHARED_CHAR_GEO.sclera, SHARED_SCLERA_MAT);
+  rightSclera.position.set(0.048, 0.185, 0.122);
+
   const leftEye = new THREE.Mesh(SHARED_CHAR_GEO.eye, SHARED_EYE_MAT);
-  leftEye.position.set(-0.048, 0.185, 0.128);
+  leftEye.position.set(-0.048, 0.185, 0.134);
   const rightEye = new THREE.Mesh(SHARED_CHAR_GEO.eye, SHARED_EYE_MAT);
-  rightEye.position.set(0.048, 0.185, 0.128);
+  rightEye.position.set(0.048, 0.185, 0.134);
 
   const leftBrow = new THREE.Mesh(SHARED_CHAR_GEO.brow, hairMat);
-  leftBrow.position.set(-0.048, 0.215, 0.132);
+  leftBrow.position.set(-0.048, 0.218, 0.134);
   const rightBrow = new THREE.Mesh(SHARED_CHAR_GEO.brow, hairMat);
-  rightBrow.position.set(0.048, 0.215, 0.132);
+  rightBrow.position.set(0.048, 0.218, 0.134);
 
   const mouthMesh = new THREE.Mesh(SHARED_CHAR_GEO.mouth, MOUTH_NEUTRAL_MAT);
-  mouthMesh.position.set(0, 0.11, 0.132);
-  headPivot.add(leftEye, rightEye, leftBrow, rightBrow, mouthMesh);
+  mouthMesh.position.set(0, 0.108, 0.133);
+  headPivot.add(leftSclera, rightSclera, leftEye, rightEye, leftBrow, rightBrow, mouthMesh);
 
   if (role === 'police_officer' || role === 'border_officer') {
     const cap = new THREE.Mesh(SHARED_CHAR_GEO.cap, jacketMat);
-    cap.position.y = 0.29;
+    cap.position.y = 0.295;
+    const capCrest = new THREE.Mesh(SHARED_CHAR_GEO.capCrest, SHARED_BADGE_MAT);
+    capCrest.rotation.x = Math.PI / 2;
+    capCrest.position.set(0, 0.295, 0.145);
     const visor = new THREE.Mesh(SHARED_CHAR_GEO.visor, SHARED_SHOE_MAT);
-    visor.position.set(0, 0.255, 0.13);
-    headPivot.add(cap, visor);
+    visor.position.set(0, 0.255, 0.132);
+    headPivot.add(cap, capCrest, visor);
   } else {
     const hair = new THREE.Mesh(SHARED_CHAR_GEO.hair, hairMat);
     hair.position.set(0, 0.19, -0.01);

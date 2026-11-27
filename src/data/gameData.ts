@@ -90,9 +90,9 @@ export const GRAPHICS_PRESETS: Record<GraphicsPreset, GraphicsSettings> = {
   },
 };
 
-// Default to Low Graphics preset optimized for integrated GPUs (e.g. Intel UHD 610)
+// Default to High Graphics PBR preset (Very Low and Low presets remain selectable in Settings)
 export const DEFAULT_SETTINGS: AllSettings = {
-  graphics: { ...GRAPHICS_PRESETS.low },
+  graphics: { ...GRAPHICS_PRESETS.high },
   audio: {
     master: 0.75,
     sfx: 0.85,
@@ -123,7 +123,7 @@ export const INITIAL_STATS: PlayerCareerStats = {
   rankIndex: 0,
   day: 1,
   difficulty: 'standard',
-  timeOfDay: 8.5,
+  timeOfDay: 22.5,
   weather: 'clear',
   totalInspected: 0,
   accurateDecisions: 0,
@@ -135,6 +135,7 @@ export const INITIAL_STATS: PlayerCareerStats = {
     uvScanner: true,
     rapidWeigh: false,
   },
+  history: [],
 };
 
 export const INITIAL_DAILY_TARGETS: DailyTarget[] = [
@@ -181,6 +182,15 @@ export interface VehicleCatalogEntry {
   width: number;
 }
 
+export const SPECIAL_VEHICLE_SPECS: Record<
+  'police_car' | 'armored_security' | 'police_tow_truck',
+  { label: string; length: number; width: number }
+> = {
+  police_car: { label: 'Police Patrol Interceptor', length: 4.85, width: 1.96 },
+  armored_security: { label: 'Armored Security Response Truck', length: 6.95, width: 2.38 },
+  police_tow_truck: { label: 'Police Heavy Recovery Tow Truck', length: 7.35, width: 2.38 },
+};
+
 export const VEHICLE_CATALOG: VehicleCatalogEntry[] = [
   { type: 'small_car', label: 'Compact City Car', isCommercial: false, isTruck: false, permittedWeightKg: 1600, baseWeightKg: 1180, length: 3.8, width: 1.78 },
   { type: 'hatchback', label: '5-Door Hatchback', isCommercial: false, isTruck: false, permittedWeightKg: 1800, baseWeightKg: 1320, length: 4.1, width: 1.82 },
@@ -194,6 +204,8 @@ export const VEHICLE_CATALOG: VehicleCatalogEntry[] = [
   { type: 'cargo_van', label: 'High-Roof Cargo Van', isCommercial: true, isTruck: false, permittedWeightKg: 4200, baseWeightKg: 3450, length: 5.6, width: 2.1 },
   { type: 'passenger_van', label: 'Shuttle Passenger Van', isCommercial: true, isTruck: false, permittedWeightKg: 3800, baseWeightKg: 3100, length: 5.4, width: 2.06 },
   { type: 'mini_truck', label: 'Light Box Mini Truck', isCommercial: true, isTruck: true, permittedWeightKg: 5500, baseWeightKg: 4650, length: 5.8, width: 2.15 },
+  { type: 'green_heavy_truck', label: 'Green Heavy Box Cargo Truck', isCommercial: true, isTruck: true, permittedWeightKg: 18500, baseWeightKg: 15800, length: 7.7, width: 2.42 },
+  { type: 'green_covered_truck', label: 'Green Covered Cargo Truck', isCommercial: true, isTruck: true, permittedWeightKg: 17500, baseWeightKg: 14900, length: 7.6, width: 2.4 },
   { type: 'heavy_cargo_truck', label: 'Heavy Cargo Truck', isCommercial: true, isTruck: true, permittedWeightKg: 16000, baseWeightKg: 13900, length: 7.4, width: 2.38 },
   { type: 'container_truck', label: 'ISO Container Hauler', isCommercial: true, isTruck: true, permittedWeightKg: 24000, baseWeightKg: 21200, length: 8.6, width: 2.45 },
   { type: 'refrigerated_truck', label: 'Cold-Chain Reefer Truck', isCommercial: true, isTruck: true, permittedWeightKg: 18000, baseWeightKg: 15800, length: 7.8, width: 2.4 },

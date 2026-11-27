@@ -9,10 +9,13 @@ import {
   FileText,
   HardDrive,
   MessageSquare,
+  History,
   Monitor,
   Scale,
   Search,
+  ShieldAlert,
   Siren,
+  Truck,
   UserCheck,
   X,
   XCircle,
@@ -403,10 +406,15 @@ export const ComputerModal: React.FC<{
   entryGateOpen: boolean;
   exitGateOpen: boolean;
   policeStatus: string | null;
+  towAvailable: boolean;
+  towStatus: string | null;
+  redRejectionAlert: { vehicleLabel: string; registration: string; reason: string } | null;
+  inspectionHistory: PlayerCareerStats['history'];
   onAcknowledgeAlarm: () => void;
   onToggleEntryGate: () => void;
   onToggleExitGate: () => void;
   onCallPolice: () => void;
+  onRequestTowTruck: () => void;
   onBuyRapidWeigh: () => void;
   onSetWeather: (w: WeatherType) => void;
   onSetTime: (h: number) => void;
@@ -419,10 +427,15 @@ export const ComputerModal: React.FC<{
   entryGateOpen,
   exitGateOpen,
   policeStatus,
+  towAvailable,
+  towStatus,
+  redRejectionAlert,
+  inspectionHistory,
   onAcknowledgeAlarm,
   onToggleEntryGate,
   onToggleExitGate,
   onCallPolice,
+  onRequestTowTruck,
   onBuyRapidWeigh,
   onSetWeather,
   onSetTime,
@@ -445,6 +458,25 @@ export const ComputerModal: React.FC<{
         </div>
 
         <div className="p-6 overflow-y-auto space-y-5 text-xs">
+          {/* Red Rejection Alert Banner */}
+          {redRejectionAlert && (
+            <div className="rounded border border-rose-500 bg-rose-950/55 p-4 space-y-1.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 font-display font-bold text-rose-300 uppercase tracking-wide">
+                  <ShieldAlert className="w-4 h-4 text-rose-400" />
+                  Vehicle Rejected — Status: REJECTED
+                </div>
+                <span className="px-2 py-0.5 rounded bg-rose-600 text-white font-mono text-[10px] font-bold">
+                  LANE LOCKED
+                </span>
+              </div>
+              <div className="text-stone-200">
+                <strong>{redRejectionAlert.vehicleLabel}</strong> ({redRejectionAlert.registration}) ·{' '}
+                <span className="text-rose-200">Reason: {redRejectionAlert.reason}</span>
+              </div>
+            </div>
+          )}
+
           {/* Vehicle Arrival Queue Alert */}
           <div
             className={`rounded border p-4 space-y-2 ${
@@ -477,8 +509,8 @@ export const ComputerModal: React.FC<{
             )}
           </div>
 
-          {/* Gate & Police Dispatch Controls */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          {/* Gate, Police & Tow Truck Dispatch Controls */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <button
               onClick={onToggleEntryGate}
               className={`py-3 px-4 rounded font-semibold cursor-pointer ${
@@ -501,12 +533,81 @@ export const ComputerModal: React.FC<{
             >
               <Siren className="w-4 h-4" /> Dispatch Police Unit
             </button>
+            <button
+              disabled={!towAvailable}
+              onClick={() => {
+                onRequestTowTruck();
+                onClose();
+              }}
+              className={`flex items-center justify-center gap-2 py-3 px-4 rounded font-semibold transition-colors ${
+                towAvailable
+                  ? 'bg-amber-500 hover:bg-amber-400 text-stone-950 cursor-pointer'
+                  : 'bg-stone-800/60 border border-stone-800 text-stone-500 cursor-not-allowed'
+              }`}
+            >
+              <Truck className="w-4 h-4" />
+              {towAvailable
+                ? 'Request Police Tow Truck (Unit T-04)'
+                : 'Tow Truck Locked (Remove Driver First)'}
+            </button>
           </div>
           {policeStatus && (
             <div className="rounded border border-blue-500/40 bg-blue-950/30 px-4 py-2 text-blue-200 font-medium">
               Police Dispatch: {policeStatus}
             </div>
           )}
+          {towStatus && (
+            <div className="rounded border border-amber-500/40 bg-amber-950/30 px-4 py-2 text-amber-200 font-medium flex items-center gap-2">
+              <Truck className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Tow Dispatch: {towStatus}</span>
+            </div>
+          )}
+
+          {/* Recent Inspection & Rejection History */}
+          <div className="rounded border border-stone-800 bg-stone-950 p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-semibold text-stone-300">
+                <History className="w-4 h-4 text-amber-400" /> Checkpoint Inspection & Rejection Log
+              </div>
+              <span className="text-[11px] font-mono text-stone-500">
+                {inspectionHistory.length} Recorded
+              </span>
+            </div>
+            {inspectionHistory.length === 0 ? (
+              <div className="text-stone-500">No completed inspections or rejections recorded in this shift yet.</div>
+            ) : (
+              <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                {inspectionHistory.slice(0, 8).map((entry, idx) => (
+                  <div
+                    key={`${entry.caseId}-${idx}`}
+                    className="rounded border border-stone-800/80 bg-stone-900/70 px-3 py-2 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold uppercase ${
+                            entry.decision === 'approved'
+                              ? 'bg-emerald-900/60 text-emerald-300'
+                              : entry.decision === 'rejected'
+                              ? 'bg-rose-900/70 text-rose-300'
+                              : 'bg-blue-900/60 text-blue-300'
+                          }`}
+                        >
+                          {entry.decision === 'police_handled' ? 'POLICE' : entry.decision}
+                        </span>
+                        <span className="font-semibold text-stone-100">{entry.vehicleLabel}</span>
+                        <span className="font-mono text-amber-300">{entry.registration}</span>
+                      </div>
+                      <div className="text-[11px] text-stone-400 mt-0.5 truncate">
+                        Driver: {entry.driverName} · {entry.reason}
+                      </div>
+                    </div>
+                    <span className="text-[10px] font-mono text-stone-500 shrink-0">{entry.timestamp}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           {/* Checkpoint Equipment Upgrade */}
           <div className="rounded border border-stone-800 bg-stone-950 p-4 flex items-center justify-between">
@@ -535,14 +636,14 @@ export const ComputerModal: React.FC<{
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="rounded border border-stone-800 bg-stone-950 p-4 space-y-2.5">
               <div className="flex items-center gap-2 font-semibold text-stone-300">
-                <Clock className="w-4 h-4 text-amber-400" /> Shift Time Control
+                <Clock className="w-4 h-4 text-amber-400" /> Night Shift Time Control
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {[
-                  ['Dawn', 6.3],
-                  ['Day', 11.5],
-                  ['Dusk', 17.8],
-                  ['Night', 22.0],
+                  ['21:30', 21.5],
+                  ['23:00', 23.0],
+                  ['00:30', 0.5],
+                  ['02:30', 2.5],
                 ].map(([label, h]) => (
                   <button
                     key={label}
@@ -673,6 +774,51 @@ export const CareerModal: React.FC<{
                 )}
               </div>
             ))}
+          </div>
+
+          <div className="space-y-2.5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 font-semibold text-stone-300">
+                <History className="w-4 h-4 text-amber-400" /> Inspection & Rejection History Log
+              </div>
+              <span className="text-[11px] font-mono text-stone-500">{stats.history.length} Entries</span>
+            </div>
+            {stats.history.length === 0 ? (
+              <div className="rounded border border-stone-800 bg-stone-950 p-3.5 text-stone-500">
+                No completed vehicle inspections recorded yet.
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                {stats.history.slice(0, 20).map((entry, idx) => (
+                  <div
+                    key={`${entry.caseId}-${idx}`}
+                    className="rounded border border-stone-800 bg-stone-950 p-3 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-mono text-[10px] font-bold uppercase ${
+                            entry.decision === 'approved'
+                              ? 'bg-emerald-900/60 text-emerald-300'
+                              : entry.decision === 'rejected'
+                              ? 'bg-rose-900/70 text-rose-300'
+                              : 'bg-blue-900/60 text-blue-300'
+                          }`}
+                        >
+                          {entry.decision === 'police_handled' ? 'POLICE' : entry.decision}
+                        </span>
+                        <span className="font-semibold text-stone-100">{entry.vehicleLabel}</span>
+                        <span className="font-mono text-amber-300">{entry.registration}</span>
+                      </div>
+                      <div className="text-stone-400 mt-1">
+                        Driver: {entry.driverName} · Reason: {entry.reason}
+                      </div>
+                    </div>
+                    <span className="text-[11px] font-mono text-stone-500 shrink-0">{entry.timestamp}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

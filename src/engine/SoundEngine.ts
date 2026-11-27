@@ -348,6 +348,62 @@ export class SoundEngine {
     osc.stop(now + 0.2);
   }
 
+  public playRejectionWarning() {
+    if (!this.ctx || !this.notifGain) return;
+    const now = this.ctx.currentTime;
+    [0, 0.22, 0.44].forEach((offset, idx) => {
+      if (!this.ctx || !this.notifGain) return;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(idx % 2 === 0 ? 480 : 340, now + offset);
+      osc.frequency.linearRampToValueAtTime(idx % 2 === 0 ? 390 : 280, now + offset + 0.17);
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 1200;
+      g.gain.setValueAtTime(0.26, now + offset);
+      g.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.19);
+      osc.connect(filter);
+      filter.connect(g);
+      g.connect(this.notifGain);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.2);
+    });
+  }
+
+  public playTowHitch() {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    // Hydraulic servo whine followed by heavy steel coupling clank
+    const hydro = this.ctx.createOscillator();
+    const hg = this.ctx.createGain();
+    hydro.type = 'sawtooth';
+    hydro.frequency.setValueAtTime(115, now);
+    hydro.frequency.linearRampToValueAtTime(215, now + 0.48);
+    const hf = this.ctx.createBiquadFilter();
+    hf.type = 'lowpass';
+    hf.frequency.value = 460;
+    hg.gain.setValueAtTime(0.15, now);
+    hg.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+    hydro.connect(hf);
+    hf.connect(hg);
+    hg.connect(this.sfxGain);
+    hydro.start(now);
+    hydro.stop(now + 0.56);
+
+    const clank = this.ctx.createOscillator();
+    const cg = this.ctx.createGain();
+    clank.type = 'square';
+    clank.frequency.setValueAtTime(290, now + 0.45);
+    clank.frequency.exponentialRampToValueAtTime(72, now + 0.65);
+    cg.gain.setValueAtTime(0.28, now + 0.45);
+    cg.gain.exponentialRampToValueAtTime(0.001, now + 0.68);
+    clank.connect(cg);
+    cg.connect(this.sfxGain);
+    clank.start(now + 0.45);
+    clank.stop(now + 0.7);
+  }
+
   public playPaper() {
     if (!this.ctx || !this.sfxGain) return;
     const now = this.ctx.currentTime;

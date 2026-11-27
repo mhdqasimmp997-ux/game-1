@@ -65,13 +65,24 @@ function genReg(): string {
 }
 
 export function generateBorderCase(day: number, difficulty: DifficultyLevel): InspectionCase {
-  // Bias slightly toward commercial cargo trucks as requested
+  // Feature both green reference trucks prominently in regular checkpoint traffic alongside other commercial & passenger vehicles
+  const refTrucks = VEHICLE_CATALOG.filter(
+    (v) => v.type === 'green_heavy_truck' || v.type === 'green_covered_truck'
+  );
+  const roll = Math.random();
   const pool =
-    Math.random() < 0.62
+    roll < 0.4 && refTrucks.length > 0
+      ? refTrucks
+      : roll < 0.72
       ? VEHICLE_CATALOG.filter((v) => v.isCommercial)
       : VEHICLE_CATALOG;
   const spec = pick(pool);
-  const color = pick(COLORS);
+  const color =
+    spec.type === 'green_heavy_truck'
+      ? { name: 'Military Olive Green', hex: 0x4c5f43 }
+      : spec.type === 'green_covered_truck'
+      ? { name: 'Field Sage Green', hex: 0x5c6d4e }
+      : pick(COLORS);
   const registration = genReg();
 
   const driverName = `${pick(FIRST_NAMES)} ${pick(LAST_NAMES)}`;
